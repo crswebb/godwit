@@ -56,8 +56,11 @@ npm install          # frontend deps
 npm run tauri dev    # compiles the Rust core and launches the app (first build is slow)
 ```
 
-The current app (Phase 0 spike) shows a form: enter an IMAP host, port, username, and password, and
-it lists the mailbox's folders. Everything runs locally; nothing is sent anywhere.
+The current app shows **Source** and **Destination** account forms. Enter both, and it copies every
+folder and message from source to destination — preserving folder structure, flags (read/unread,
+flagged, answered, draft), and internal dates, skipping any message already present (by Message-ID).
+Start with **Dry run** checked to preview counts without writing. Everything runs locally; the source
+is only ever read (BODY.PEEK), and nothing is ever deleted.
 
 > **Icons** in `src-tauri/icons/` are solid-colour placeholders. Before the first `tauri build`,
 > regenerate the full platform set (incl. `.icns`/`.ico`) from a real logo:
@@ -77,10 +80,11 @@ godwit/
 
 ## Status
 
-**Pre-MVP — Phase 0 spike (2026-09-13).**
-Working: connect to an IMAP box over TLS and list its folders.
-Next: fill in `docs/providers/` for the first host pair (CalDAV/CardDAV check), then grow the Generic
-connector toward a full email migration (Phase 1).
+**Pre-MVP — Phase 1 in progress (2026-09-13).**
+Working: full IMAP→IMAP email copy — folders, messages, flags, internal dates, Message-ID dedup,
+live progress, and a dry-run mode.
+Next: checkpoint/resume across interruptions and a post-run verification pass (Phase 1 steps 5–6),
+then calendar + contacts (Phase 2). Also: fill in `docs/providers/` for the first host pair.
 
 ## Docs
 

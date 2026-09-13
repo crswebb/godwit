@@ -1,43 +1,104 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
+  import { listen } from "@tauri-apps/api/event";
+  import AccountForm, { type Creds } from "./lib/AccountForm.svelte";
 
-  type FolderInfo = {
-    name: string;
-    delimiter: string | null;
-    attributes: string[];
+  type FolderReport = {
+    folder: string;
+    sourceTotal: number;
+    copied: number;
+    skipped: number;
+    failed: number;
   };
+  type MigrationReport = {
+    folders: FolderReport[];
+    copied: number;
+    skipped: number;
+    failed: number;
+  };
+  type Progress =
+    | { type: "started"; folders: number }
+    | { type: "folderStart"; name: string; index: number; folders: number; sourceTotal: number }
+    | { type: "tick"; folder: string; done: number; total: number }
+    | { type: "folderDone"; report: FolderReport }
+    | { type: "warning"; message: string }
+    | { type: "done"; report: MigrationReport };
 
-  let host = $state("");
-  let port = $state(993);
-  let username = $state("");
-  let password = $state("");
+  let source = $state<Creds>({ host: "", port: 993, username: "", password: "" });
+  let destination = $state<Creds>({ host: "", port: 993, username: "", password: "" });
+  let dryRun = $state(true);
 
-  let loading = $state(false);
+  let running = $state(false);
   let error = $state<string | null>(null);
-  let folders = $state<FolderInfo[] | null>(null);
+  let report = $state<MigrationReport | null>(null);
 
-  const canSubmit = $derived(
-    host.trim() !== "" && username.trim() !== "" && password !== "" && !loading,
+  // Live state during a run.
+  let totalFolders = $state(0);
+  let current = $state<{ name: string; index: number; done: number; total: number } | null>(null);
+  let doneFolders = $state<FolderReport[]>([]);
+  let warnings = $state<string[]>([]);
+
+  const canRun = $derived(
+    source.host.trim() !== "" &&
+      source.username.trim() !== "" &&
+      source.password !== "" &&
+      destination.host.trim() !== "" &&
+      destination.username.trim() !== "" &&
+      destination.password !== "" &&
+      !running,
   );
 
-  async function connect(event: SubmitEvent) {
-    event.preventDefault();
-    loading = true;
+  $effect(() => {
+    const unlisten = listen<Progress>("migration://progress", (event) => {
+      const p = event.payload;
+      switch (p.type) {
+        case "started":
+          totalFolders = p.folders;
+          break;
+        case "folderStart":
+          current = { name: p.name, index: p.index, done: 0, total: p.sourceTotal };
+          break;
+        case "tick":
+          if (current && current.name === p.folder) {
+            current = { ...current, done: p.done, total: p.total };
+          }
+          break;
+        case "folderDone":
+          doneFolders = [...doneFolders, p.report];
+          current = null;
+          break;
+        case "warning":
+          warnings = [...warnings, p.message];
+          break;
+        case "done":
+          report = p.report;
+          current = null;
+          break;
+      }
+    });
+    return () => {
+      unlisten.then((f) => f());
+    };
+  });
+
+  async function run() {
+    running = true;
     error = null;
-    folders = null;
+    report = null;
+    doneFolders = [];
+    warnings = [];
+    current = null;
+    totalFolders = 0;
     try {
-      folders = await invoke<FolderInfo[]>("list_folders", {
-        creds: {
-          host: host.trim(),
-          port: Number(port),
-          username: username.trim(),
-          password,
-        },
+      report = await invoke<MigrationReport>("migrate", {
+        source,
+        destination,
+        options: { dryRun },
       });
     } catch (err) {
       error = typeof err === "string" ? err : String(err);
     } finally {
-      loading = false;
+      running = false;
     }
   }
 </script>
@@ -46,79 +107,107 @@
   <header>
     <h1>Godwit</h1>
     <p class="tagline">
-      Phase&nbsp;0 spike — connect to a mailbox and list its folders. Nothing leaves
-      this machine.
+      Copy email from one account to another — folders, flags, and dates preserved.
+      Nothing leaves this machine; the source is only ever read.
     </p>
   </header>
 
-  <form onsubmit={connect}>
-    <div class="row">
-      <label class="grow">
-        <span>IMAP host</span>
-        <input
-          type="text"
-          bind:value={host}
-          placeholder="imap.example.com"
-          autocomplete="off"
-          spellcheck="false"
-        />
-      </label>
-      <label class="port">
-        <span>Port</span>
-        <input type="number" bind:value={port} min="1" max="65535" />
-      </label>
-    </div>
+  <div class="accounts">
+    <AccountForm bind:creds={source} label="Source" disabled={running} />
+    <div class="arrow" aria-hidden="true">→</div>
+    <AccountForm bind:creds={destination} label="Destination" disabled={running} />
+  </div>
 
-    <label>
-      <span>Username</span>
-      <input
-        type="text"
-        bind:value={username}
-        placeholder="you@example.com"
-        autocomplete="off"
-        spellcheck="false"
-      />
+  <div class="controls">
+    <label class="dry">
+      <input type="checkbox" bind:checked={dryRun} disabled={running} />
+      <span>
+        <strong>Dry run</strong> — walk everything and count, but write nothing.
+        {#if dryRun}<em>Uncheck to actually copy.</em>{/if}
+      </span>
     </label>
-
-    <label>
-      <span>Password / app password</span>
-      <input type="password" bind:value={password} autocomplete="off" />
-    </label>
-
-    <button type="submit" disabled={!canSubmit}>
-      {loading ? "Connecting…" : "Connect & list folders"}
+    <button onclick={run} disabled={!canRun}>
+      {running ? "Migrating…" : dryRun ? "Preview migration" : "Start migration"}
     </button>
-  </form>
+  </div>
 
   {#if error}
     <div class="error" role="alert">
-      <strong>Couldn't connect.</strong>
+      <strong>Migration failed.</strong>
       <span>{error}</span>
     </div>
   {/if}
 
-  {#if folders}
-    <section class="results">
-      <h2>{folders.length} folder{folders.length === 1 ? "" : "s"}</h2>
-      <ul>
-        {#each folders as folder (folder.name)}
-          <li>
-            <span class="folder-name">{folder.name}</span>
-            {#if folder.attributes.length}
-              <span class="attrs">{folder.attributes.join(" · ")}</span>
-            {/if}
-          </li>
-        {/each}
-      </ul>
+  {#if running || doneFolders.length || report}
+    <section class="status">
+      {#if current}
+        <div class="current">
+          <div class="current-head">
+            <span class="folder">{current.name}</span>
+            <span class="muted">{current.done} / {current.total}</span>
+          </div>
+          <div class="bar">
+            <div
+              class="fill"
+              style="width: {current.total ? (current.done / current.total) * 100 : 0}%"
+            ></div>
+          </div>
+          <div class="muted small">
+            Folder {current.index + 1} of {totalFolders}
+          </div>
+        </div>
+      {/if}
+
+      {#if doneFolders.length}
+        <table>
+          <thead>
+            <tr><th>Folder</th><th>Source</th><th>Copied</th><th>Skipped</th><th>Failed</th></tr>
+          </thead>
+          <tbody>
+            {#each doneFolders as f (f.folder)}
+              <tr>
+                <td class="folder">{f.folder}</td>
+                <td>{f.sourceTotal}</td>
+                <td>{f.copied}</td>
+                <td>{f.skipped}</td>
+                <td class:bad={f.failed > 0}>{f.failed}</td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+      {/if}
+
+      {#if report}
+        <div class="summary" class:ok={report.failed === 0}>
+          <strong>
+            {dryRun ? "Preview complete" : "Migration complete"}
+          </strong>
+          <span>
+            {report.copied} copied · {report.skipped} skipped · {report.failed} failed
+            across {report.folders.length} folders.
+          </span>
+        </div>
+      {/if}
+
+      {#if warnings.length}
+        <details class="warnings">
+          <summary>{warnings.length} warning{warnings.length === 1 ? "" : "s"}</summary>
+          <ul>
+            {#each warnings as w, i (i)}
+              <li>{w}</li>
+            {/each}
+          </ul>
+        </details>
+      {/if}
     </section>
   {/if}
 </main>
 
 <style>
   main {
-    max-width: 560px;
+    max-width: 760px;
     margin: 0 auto;
-    padding: 32px 20px 56px;
+    padding: 28px 20px 56px;
   }
 
   header h1 {
@@ -131,62 +220,58 @@
     margin: 4px 0 0;
     color: var(--muted);
     font-size: 0.9rem;
+    max-width: 60ch;
   }
 
-  form {
-    margin-top: 26px;
-    background: var(--card);
-    border: 1px solid var(--line);
-    border-radius: 14px;
-    padding: 20px;
+  .accounts {
+    margin-top: 22px;
     display: flex;
-    flex-direction: column;
-    gap: 14px;
-  }
-
-  .row {
-    display: flex;
+    align-items: center;
     gap: 12px;
   }
 
-  label {
+  .arrow {
+    color: var(--muted);
+    font-size: 1.4rem;
+    flex: none;
+  }
+
+  .controls {
+    margin-top: 16px;
     display: flex;
-    flex-direction: column;
-    gap: 5px;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    flex-wrap: wrap;
+  }
+
+  .dry {
+    display: flex;
+    align-items: flex-start;
+    gap: 9px;
     font-size: 0.85rem;
     color: var(--muted);
+    max-width: 46ch;
   }
 
-  .grow {
-    flex: 1;
+  .dry input {
+    margin-top: 2px;
   }
 
-  .port {
-    width: 92px;
-  }
-
-  input {
-    padding: 9px 11px;
-    border: 1px solid var(--line);
-    border-radius: 9px;
-    background: var(--bg);
-    color: var(--ink);
-  }
-
-  input:focus {
-    outline: 2px solid var(--accent);
-    outline-offset: -1px;
+  .dry em {
+    font-style: normal;
+    color: var(--accent);
   }
 
   button {
-    margin-top: 4px;
-    padding: 11px 14px;
+    padding: 11px 18px;
     border: none;
     border-radius: 9px;
     background: var(--accent);
     color: var(--accent-ink);
     font-weight: 600;
     cursor: pointer;
+    flex: none;
   }
 
   button:disabled {
@@ -206,46 +291,100 @@
     gap: 3px;
   }
 
-  .results {
-    margin-top: 26px;
+  .status {
+    margin-top: 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
   }
 
-  .results h2 {
-    font-size: 1rem;
-    color: var(--muted);
+  .current-head {
+    display: flex;
+    justify-content: space-between;
+    font-size: 0.9rem;
+    margin-bottom: 6px;
+  }
+
+  .current .folder {
     font-weight: 600;
-    margin: 0 0 10px;
   }
 
-  ul {
-    list-style: none;
-    margin: 0;
-    padding: 0;
-    border: 1px solid var(--line);
-    border-radius: 12px;
+  .bar {
+    height: 8px;
+    border-radius: 999px;
+    background: var(--line);
     overflow: hidden;
   }
 
-  li {
-    display: flex;
-    justify-content: space-between;
-    align-items: baseline;
-    gap: 12px;
-    padding: 10px 14px;
-    background: var(--card);
+  .fill {
+    height: 100%;
+    background: var(--accent);
+    transition: width 0.2s ease;
   }
 
-  li:not(:last-child) {
+  .muted {
+    color: var(--muted);
+  }
+
+  .small {
+    font-size: 0.78rem;
+    margin-top: 5px;
+  }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.85rem;
+  }
+
+  th,
+  td {
+    text-align: right;
+    padding: 7px 10px;
     border-bottom: 1px solid var(--line);
   }
 
-  .folder-name {
-    font-weight: 500;
+  th:first-child,
+  td.folder {
+    text-align: left;
   }
 
-  .attrs {
+  th {
     color: var(--muted);
-    font-size: 0.78rem;
-    text-align: right;
+    font-weight: 600;
+  }
+
+  td.bad {
+    color: var(--danger);
+    font-weight: 600;
+  }
+
+  .summary {
+    padding: 12px 14px;
+    border-radius: 10px;
+    background: var(--line);
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    font-size: 0.9rem;
+  }
+
+  .summary.ok {
+    background: color-mix(in srgb, var(--accent) 18%, transparent);
+  }
+
+  .warnings {
+    font-size: 0.83rem;
+    color: var(--muted);
+  }
+
+  .warnings ul {
+    margin: 8px 0 0;
+    padding-left: 18px;
+  }
+
+  .warnings li {
+    margin-bottom: 3px;
+    word-break: break-word;
   }
 </style>
