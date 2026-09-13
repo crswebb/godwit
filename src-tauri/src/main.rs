@@ -26,7 +26,7 @@ pub struct ImapCreds {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MigrateOptions {
-    /// When true, walk everything and report counts but write nothing.
+    /// When true, work out what would move (envelope-only) but write nothing.
     pub dry_run: bool,
 }
 
@@ -46,6 +46,9 @@ pub struct FolderReport {
     pub copied: u32,
     pub skipped: u32,
     pub failed: u32,
+    /// Source Message-IDs still absent from the destination after copying
+    /// (independent verification recount). 0 means fully verified.
+    pub missing: u32,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -54,6 +57,7 @@ pub struct MigrationReport {
     pub copied: u32,
     pub skipped: u32,
     pub failed: u32,
+    pub missing: u32,
 }
 
 impl MigrationReport {
@@ -61,6 +65,7 @@ impl MigrationReport {
         self.copied += fr.copied;
         self.skipped += fr.skipped;
         self.failed += fr.failed;
+        self.missing += fr.missing;
         self.folders.push(fr);
     }
 }
@@ -78,7 +83,10 @@ enum Progress {
 }
 
 const PROGRESS_EVENT: &str = "migration://progress";
+/// Full-message (body) fetch batch — kept small to bound memory on large messages.
 const FETCH_BATCH: usize = 20;
+/// Envelope-only fetch batch — envelopes are tiny, so this can be large.
+const ENVELOPE_BATCH: usize = 500;
 
 fn emit(app: &tauri::AppHandle, p: Progress) {
     let _ = app.emit(PROGRESS_EVENT, p);
@@ -127,7 +135,8 @@ async fn list_folders(creds: ImapCreds) -> Result<Vec<FolderInfo>, String> {
 }
 
 /// Copy every folder + message from `source` to `destination`, preserving
-/// flags and internal date, skipping messages already present (by Message-ID).
+/// flags and internal date, skipping messages already present (by Message-ID),
+/// then verifying the destination independently.
 ///
 /// Read-only against the source (BODY.PEEK, never STORE). Never deletes anything.
 #[tauri::command]
@@ -197,23 +206,12 @@ fn copy_folder(
     // Ensure the destination folder exists (ignore "already exists").
     let _ = dst.create(name);
 
-    // Build the set of Message-IDs already on the destination, so re-runs
-    // don't duplicate.
+    // Destination state before copying: which Message-IDs are already there.
     let dmb = dst.select(name).map_err(|e| format!("select destination: {e}"))?;
-    let mut seen: HashSet<String> = HashSet::new();
-    if dmb.exists > 0 {
-        let envs = dst
-            .fetch("1:*", "ENVELOPE")
-            .map_err(|e| format!("destination ENVELOPE fetch: {e}"))?;
-        for f in envs.iter() {
-            if let Some(id) = message_id(f) {
-                seen.insert(id);
-            }
-        }
-    }
+    let dest_before = collect_ids_by_seq(dst, dmb.exists)?;
 
-    // Source is opened with SELECT but only ever read via BODY.PEEK, so its
-    // messages are never marked \Seen or otherwise modified.
+    // Source state. SELECT (not STORE) + BODY.PEEK means the source is only
+    // ever read — messages are never marked \Seen or otherwise modified.
     let smb = src.select(name).map_err(|e| format!("select source: {e}"))?;
     let total = smb.exists;
     emit(
@@ -228,66 +226,125 @@ fn copy_folder(
         .collect();
     uids.sort_unstable();
 
-    let mut fr = FolderReport { folder: name.to_string(), source_total: total, ..Default::default() };
-    let mut done = 0u32;
+    // Pass 1 (cheap): envelope-only, to learn each message's UID + Message-ID.
+    let src_entries = collect_source_entries(src, &uids)?;
 
-    for chunk in uids.chunks(FETCH_BATCH) {
+    // Messages missing from the destination are the ones to copy. Messages
+    // with no Message-ID can't be deduped, so we always copy them.
+    let to_copy: Vec<u32> = src_entries
+        .iter()
+        .filter(|(_, id)| match id {
+            Some(id) => !dest_before.contains(id),
+            None => true,
+        })
+        .map(|(uid, _)| *uid)
+        .collect();
+
+    let mut fr = FolderReport {
+        folder: name.to_string(),
+        source_total: total,
+        skipped: src_entries.len().saturating_sub(to_copy.len()) as u32,
+        ..Default::default()
+    };
+
+    if opts.dry_run {
+        fr.copied = to_copy.len() as u32;
+        return Ok(fr);
+    }
+
+    // Pass 2: fetch bodies only for the messages that need copying.
+    let target = to_copy.len() as u32;
+    let mut done = 0u32;
+    for chunk in to_copy.chunks(FETCH_BATCH) {
         let set = chunk.iter().map(u32::to_string).collect::<Vec<_>>().join(",");
         let messages = src
-            .uid_fetch(&set, "(FLAGS INTERNALDATE ENVELOPE BODY.PEEK[])")
+            .uid_fetch(&set, "(FLAGS INTERNALDATE BODY.PEEK[])")
             .map_err(|e| format!("UID FETCH: {e}"))?;
 
         for m in messages.iter() {
             done += 1;
-
-            let body = match m.body() {
-                Some(b) => b,
-                None => {
-                    fr.failed += 1;
-                    continue;
-                }
-            };
-
-            let id = message_id(m);
-            if let Some(id) = &id {
-                if seen.contains(id) {
-                    fr.skipped += 1;
-                    continue;
-                }
-            }
-
-            if opts.dry_run {
-                // Preview: this message is not a duplicate, so it *would* be
-                // copied. (Duplicates were already counted as skipped above.)
-                fr.copied += 1;
-            } else {
-                let flags = map_flags(m.flags());
-                match dst.append_with_flags_and_date(name, body, &flags, m.internal_date()) {
-                    Ok(()) => {
-                        fr.copied += 1;
-                        if let Some(id) = id {
-                            seen.insert(id);
+            match m.body() {
+                Some(body) => {
+                    let flags = map_flags(m.flags());
+                    match dst.append_with_flags_and_date(name, body, &flags, m.internal_date()) {
+                        Ok(()) => fr.copied += 1,
+                        Err(e) => {
+                            fr.failed += 1;
+                            emit(app, Progress::Warning {
+                                message: format!("{name}: append failed: {e}"),
+                            });
                         }
                     }
-                    Err(e) => {
-                        fr.failed += 1;
-                        emit(app, Progress::Warning { message: format!("{name}: append failed: {e}") });
-                    }
                 }
+                None => fr.failed += 1,
             }
 
-            if done % 25 == 0 || done == total {
-                emit(app, Progress::Tick { folder: name.to_string(), done, total });
+            if done % 25 == 0 || done == target {
+                emit(app, Progress::Tick { folder: name.to_string(), done, total: target });
             }
         }
     }
+
+    // Verification: independently re-read the destination and confirm every
+    // source Message-ID is now present.
+    let dmb2 = dst.select(name).map_err(|e| format!("re-select destination: {e}"))?;
+    let dest_after = collect_ids_by_seq(dst, dmb2.exists)?;
+    fr.missing = src_entries
+        .iter()
+        .filter_map(|(_, id)| id.as_ref())
+        .filter(|id| !dest_after.contains(*id))
+        .count() as u32;
 
     Ok(fr)
 }
 
 // --- Helpers ---------------------------------------------------------------
 
-/// Extract a message's Message-ID from its ENVELOPE, for dedup.
+/// Collect the Message-IDs in the currently-selectable mailbox by walking it in
+/// sequence-number batches. `exists` is the message count from SELECT.
+fn collect_ids_by_seq(session: &mut ImapSession, exists: u32) -> Result<HashSet<String>, String> {
+    let mut ids = HashSet::new();
+    if exists == 0 {
+        return Ok(ids);
+    }
+    let mut start = 1u32;
+    while start <= exists {
+        let end = (start + ENVELOPE_BATCH as u32 - 1).min(exists);
+        let seq = format!("{start}:{end}");
+        let items = session
+            .fetch(&seq, "(ENVELOPE)")
+            .map_err(|e| format!("ENVELOPE fetch: {e}"))?;
+        for f in items.iter() {
+            if let Some(id) = message_id(f) {
+                ids.insert(id);
+            }
+        }
+        start = end + 1;
+    }
+    Ok(ids)
+}
+
+/// Fetch (UID, Message-ID) for every source message, envelope-only, in batches.
+fn collect_source_entries(
+    session: &mut ImapSession,
+    uids: &[u32],
+) -> Result<Vec<(u32, Option<String>)>, String> {
+    let mut out = Vec::with_capacity(uids.len());
+    for chunk in uids.chunks(ENVELOPE_BATCH) {
+        let set = chunk.iter().map(u32::to_string).collect::<Vec<_>>().join(",");
+        let items = session
+            .uid_fetch(&set, "(UID ENVELOPE)")
+            .map_err(|e| format!("UID ENVELOPE fetch: {e}"))?;
+        for f in items.iter() {
+            if let Some(uid) = f.uid {
+                out.push((uid, message_id(f)));
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Extract a message's Message-ID from its ENVELOPE, for dedup + verification.
 fn message_id(f: &Fetch) -> Option<String> {
     f.envelope()
         .and_then(|e| e.message_id.as_deref())

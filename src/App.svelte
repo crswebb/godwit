@@ -9,12 +9,14 @@
     copied: number;
     skipped: number;
     failed: number;
+    missing: number;
   };
   type MigrationReport = {
     folders: FolderReport[];
     copied: number;
     skipped: number;
     failed: number;
+    missing: number;
   };
   type Progress =
     | { type: "started"; folders: number }
@@ -184,7 +186,7 @@
       {/if}
 
       {#if report}
-        <div class="summary" class:ok={report.failed === 0}>
+        <div class="summary" class:ok={report.failed === 0 && report.missing === 0}>
           <strong>
             {dryRun ? "Preview complete" : "Migration complete"}
           </strong>
@@ -192,7 +194,8 @@
             {#if dryRun}
               {report.copied} would copy · {report.skipped} already there · {report.failed} failed
             {:else}
-              {report.copied} copied · {report.skipped} skipped (already there) · {report.failed} failed
+              {report.copied} copied · {report.skipped} skipped (already there) · {report.failed}
+              failed{report.missing > 0 ? ` · ${report.missing} missing after verify` : " · verified ✓"}
             {/if}
             across {report.folders.length} folders.
           </span>
