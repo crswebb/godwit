@@ -4,7 +4,9 @@
   type MsFolder = { name: string; count: number };
   type MsProbe = { folders: MsFolder[]; calendars: string[]; contactFolders: string[] };
 
-  let clientId = $state("");
+  // Pre-filled with the Godwit app registered in the CRS Webbproduktion tenant.
+  // A client ID is a public identifier, not a secret; change it to use another app.
+  let clientId = $state("5746290e-9198-489b-b325-be452af41cc5");
   let email = $state<string | null>(null);
   let signingIn = $state(false);
   let probing = $state(false);
