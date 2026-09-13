@@ -4,18 +4,16 @@
   type DavKind = "calendar" | "contacts";
   type DavCollection = { name: string; href: string; count: number | null };
 
-  let url = $state("");
-  let username = $state("");
+  let email = $state("");
   let password = $state("");
+  let serverUrl = $state("");
   let kind = $state<DavKind>("calendar");
 
   let loading = $state(false);
   let error = $state<string | null>(null);
   let collections = $state<DavCollection[] | null>(null);
 
-  const canDiscover = $derived(
-    url.trim() !== "" && username.trim() !== "" && password !== "" && !loading,
-  );
+  const canDiscover = $derived(email.trim() !== "" && password !== "" && !loading);
 
   async function discover() {
     loading = true;
@@ -23,7 +21,11 @@
     collections = null;
     try {
       collections = await invoke<DavCollection[]>("dav_discover", {
-        account: { url: url.trim(), username: username.trim(), password },
+        account: {
+          url: serverUrl.trim() === "" ? null : serverUrl.trim(),
+          username: email.trim(),
+          password,
+        },
         kind,
       });
     } catch (err) {
@@ -36,15 +38,19 @@
 
 <div class="dav">
   <p class="hint">
-    Enter a CalDAV/CardDAV base URL (e.g. <code>https://caldav.one.com/</code>) with the same
-    username/password you use for that service. Discovery is read-only. Not every host offers DAV —
-    basic email plans often don't.
+    Enter your email and password — Godwit will try to find the calendar/contacts server
+    automatically. Discovery is read-only. Not every host offers CalDAV/CardDAV (basic email plans
+    often don't).
   </p>
 
   <div class="fields">
     <label class="grow">
-      <span>DAV base URL</span>
-      <input type="text" bind:value={url} placeholder="https://caldav.example.com/" spellcheck="false" autocomplete="off" />
+      <span>Email</span>
+      <input type="text" bind:value={email} placeholder="you@example.com" spellcheck="false" autocomplete="off" />
+    </label>
+    <label class="grow">
+      <span>Password</span>
+      <input type="password" bind:value={password} autocomplete="off" />
     </label>
     <label>
       <span>Type</span>
@@ -54,16 +60,20 @@
       </select>
     </label>
   </div>
-  <div class="fields">
-    <label class="grow">
-      <span>Username</span>
-      <input type="text" bind:value={username} placeholder="you@example.com" spellcheck="false" autocomplete="off" />
+
+  <details class="advanced">
+    <summary>Advanced</summary>
+    <label>
+      <span>Server URL (only if autodiscovery fails)</span>
+      <input
+        type="text"
+        bind:value={serverUrl}
+        placeholder="https://caldav.example.com/"
+        spellcheck="false"
+        autocomplete="off"
+      />
     </label>
-    <label class="grow">
-      <span>Password</span>
-      <input type="password" bind:value={password} autocomplete="off" />
-    </label>
-  </div>
+  </details>
 
   <button onclick={discover} disabled={!canDiscover}>
     {loading ? "Discovering…" : "Discover"}
@@ -75,7 +85,7 @@
 
   {#if collections}
     {#if collections.length === 0}
-      <p class="empty">No {kind === "calendar" ? "calendars" : "address books"} found at that URL.</p>
+      <p class="empty">No {kind === "calendar" ? "calendars" : "address books"} found for that account.</p>
     {:else}
       <ul>
         {#each collections as c (c.href)}
@@ -104,13 +114,10 @@
     max-width: 62ch;
   }
 
-  .hint code {
-    font-size: 0.9em;
-  }
-
   .fields {
     display: flex;
     gap: 10px;
+    flex-wrap: wrap;
   }
 
   label {
@@ -123,6 +130,7 @@
 
   .grow {
     flex: 1;
+    min-width: 160px;
   }
 
   input,
@@ -139,6 +147,16 @@
   select:focus {
     outline: 2px solid var(--accent);
     outline-offset: -1px;
+  }
+
+  .advanced summary {
+    cursor: pointer;
+    font-size: 0.8rem;
+    color: var(--muted);
+  }
+
+  .advanced label {
+    margin-top: 8px;
   }
 
   button {

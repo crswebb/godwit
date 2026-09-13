@@ -1,18 +1,28 @@
-//! Minimal CalDAV / CardDAV client: discover collections and (later) read/write
-//! items. Hand-rolled on reqwest + quick-xml because the Rust DAV-client crates
-//! are immature. Namespace-prefix-agnostic (matches XML by local name).
+//! Minimal CalDAV / CardDAV client: autodiscover + list collections and
+//! (later) read/write items. Hand-rolled on reqwest + quick-xml because the
+//! Rust DAV-client crates are immature. Namespace-prefix-agnostic (matches XML
+//! by local name).
+//!
+//! Autodiscovery follows RFC 6764's well-known URIs: a PROPFIND to
+//! `https://<domain>/.well-known/caldav` is redirected by the server to the
+//! real context path. (SRV-record discovery — needed to fully auto-resolve
+//! Google/iCloud — is a future addition; those use the manual URL override.)
 
 use quick_xml::events::Event;
 use quick_xml::Reader;
 use reqwest::blocking::Client;
+use reqwest::header::LOCATION;
+use reqwest::redirect::Policy;
 use reqwest::{Method, Url};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct DavAccount {
-    /// The DAV base URL to start discovery from, e.g. `https://caldav.one.com/`.
-    pub url: String,
+    /// Optional explicit DAV base URL. When empty, discovery uses the domain of
+    /// `username` (an email address) via `.well-known`.
+    #[serde(default)]
+    pub url: Option<String>,
     pub username: String,
     pub password: String,
 }
@@ -41,43 +51,92 @@ struct ResponseEntry {
 fn http_client() -> Result<Client, String> {
     Client::builder()
         .timeout(Duration::from_secs(30))
+        // Follow well-known redirects manually so PROPFIND method + body survive.
+        .redirect(Policy::none())
         .build()
         .map_err(|e| format!("HTTP client init failed: {e}"))
 }
 
-fn propfind(client: &Client, acc: &DavAccount, url: &Url, depth: &str, body: &str) -> Result<String, String> {
-    let method = Method::from_bytes(b"PROPFIND").expect("valid method");
-    let resp = client
-        .request(method, url.clone())
-        .basic_auth(&acc.username, Some(&acc.password))
-        .header("Depth", depth)
-        .header("Content-Type", "application/xml; charset=utf-8")
-        .body(body.to_string())
-        .send()
-        .map_err(|e| format!("PROPFIND {url} failed: {e}"))?;
+/// PROPFIND with manual redirect handling. Returns the response body and the
+/// final URL it was served from (so relative hrefs resolve correctly even after
+/// a well-known redirect to another host).
+fn propfind(
+    client: &Client,
+    acc: &DavAccount,
+    url: &Url,
+    depth: &str,
+    body: &str,
+) -> Result<(String, Url), String> {
+    let mut current = url.clone();
+    for _ in 0..6 {
+        let method = Method::from_bytes(b"PROPFIND").expect("valid method");
+        let resp = client
+            .request(method, current.clone())
+            .basic_auth(&acc.username, Some(&acc.password))
+            .header("Depth", depth)
+            .header("Content-Type", "application/xml; charset=utf-8")
+            .body(body.to_string())
+            .send()
+            .map_err(|e| format!("PROPFIND {current} failed: {e}"))?;
 
-    let status = resp.status();
-    let text = resp.text().map_err(|e| format!("reading response from {url}: {e}"))?;
-    // 207 Multi-Status is the expected success code for PROPFIND.
-    if status.as_u16() != 207 && !status.is_success() {
+        let status = resp.status();
+
+        if status.is_redirection() {
+            let loc = resp
+                .headers()
+                .get(LOCATION)
+                .and_then(|v| v.to_str().ok())
+                .ok_or_else(|| format!("{current} redirected without a Location header"))?;
+            let next = current.join(loc).map_err(|e| format!("bad redirect target: {e}"))?;
+            if next.scheme() != "https" {
+                return Err("refusing to follow a non-HTTPS redirect".into());
+            }
+            current = next;
+            continue;
+        }
+
+        let text = resp.text().map_err(|e| format!("reading response from {current}: {e}"))?;
+        if status.as_u16() == 207 || status.is_success() {
+            return Ok((text, current));
+        }
         if status.as_u16() == 401 {
             return Err("Authentication failed (check username/password).".into());
         }
-        return Err(format!("{url} returned HTTP {}", status.as_u16()));
+        return Err(format!("{current} returned HTTP {}", status.as_u16()));
     }
-    Ok(text)
+    Err("too many redirects during discovery".into())
+}
+
+/// Work out where to begin discovery: an explicit URL if given, otherwise the
+/// `.well-known` path on the domain of the (email) username.
+fn start_url(acc: &DavAccount, kind: DavKind) -> Result<Url, String> {
+    if let Some(u) = acc.url.as_deref().map(str::trim).filter(|u| !u.is_empty()) {
+        return Url::parse(u).map_err(|e| format!("Invalid URL: {e}"));
+    }
+    let domain = acc
+        .username
+        .split('@')
+        .nth(1)
+        .filter(|d| !d.is_empty())
+        .ok_or("Enter your email address as the username, or add a server URL under Advanced.")?;
+    let wk = match kind {
+        DavKind::Calendar => "caldav",
+        DavKind::Contacts => "carddav",
+    };
+    Url::parse(&format!("https://{domain}/.well-known/{wk}"))
+        .map_err(|e| format!("Could not build discovery URL: {e}"))
 }
 
 /// Discover the calendars or address books for an account.
 pub fn discover(acc: &DavAccount, kind: DavKind) -> Result<Vec<DavCollection>, String> {
     let client = http_client()?;
-    let base = Url::parse(&acc.url).map_err(|e| format!("Invalid URL: {e}"))?;
+    let start = start_url(acc, kind)?;
 
-    // 1. current-user-principal
+    // 1. current-user-principal (this also resolves any well-known redirect).
     let body = r#"<?xml version="1.0" encoding="utf-8"?><d:propfind xmlns:d="DAV:"><d:prop><d:current-user-principal/></d:prop></d:propfind>"#;
-    let xml = propfind(&client, acc, &base, "0", body)?;
+    let (xml, base) = propfind(&client, acc, &start, "0", body)?;
     let principal_href = first_href_in(&xml, "current-user-principal")
-        .ok_or("Server did not return a user principal (is this a CalDAV/CardDAV URL?).")?;
+        .ok_or("Couldn't find a calendar/contacts service for that account. Try adding the server URL under Advanced.")?;
     let principal = base.join(&principal_href).map_err(|e| format!("resolving principal: {e}"))?;
 
     // 2. home-set for the requested kind
@@ -93,14 +152,14 @@ pub fn discover(acc: &DavAccount, kind: DavKind) -> Result<Vec<DavCollection>, S
             "addressbook",
         ),
     };
-    let xml = propfind(&client, acc, &principal, "0", body)?;
+    let (xml, _) = propfind(&client, acc, &principal, "0", body)?;
     let home_href = first_href_in(&xml, home_local)
         .ok_or("Server did not return a home-set for this data type.")?;
     let home = base.join(&home_href).map_err(|e| format!("resolving home-set: {e}"))?;
 
     // 3. enumerate collections under the home-set
     let body = r#"<?xml version="1.0" encoding="utf-8"?><d:propfind xmlns:d="DAV:"><d:prop><d:resourcetype/><d:displayname/></d:prop></d:propfind>"#;
-    let xml = propfind(&client, acc, &home, "1", body)?;
+    let (xml, _) = propfind(&client, acc, &home, "1", body)?;
 
     let mut out = Vec::new();
     for r in parse_responses(&xml) {
@@ -118,7 +177,7 @@ pub fn discover(acc: &DavAccount, kind: DavKind) -> Result<Vec<DavCollection>, S
 /// type / .ics|.vcf href; the collection itself does not).
 fn count_items(client: &Client, acc: &DavAccount, url: &Url) -> Result<u32, String> {
     let body = r#"<?xml version="1.0" encoding="utf-8"?><d:propfind xmlns:d="DAV:"><d:prop><d:getcontenttype/></d:prop></d:propfind>"#;
-    let xml = propfind(client, acc, url, "1", body)?;
+    let (xml, _) = propfind(client, acc, url, "1", body)?;
     let n = parse_responses(&xml)
         .iter()
         .filter(|r| {
