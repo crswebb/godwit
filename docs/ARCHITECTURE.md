@@ -8,14 +8,15 @@
 2. **Never hold credentials.** Secrets live in the OS keychain on the device. We can't leak what we
    never receive.
 3. **Any provider → any provider.** Achieved with connectors, not per-pair integrations.
-4. **No data loss.** Idempotent, resumable, verified. Calendar loss is unacceptable by requirement.
+4. **Data integrity.** Copy-only, idempotent, resumable, and verified — designed so nothing is
+   silently dropped.
 
 ---
 
 ## The core idea: hub-and-spoke connectors
 
-Naively building "One.com→Loopia", "M365→Google", … is an **N×N explosion**. Instead, every provider
-is a **connector** that can *read* (as a source) and *write* (as a destination) in a **canonical
+Naively building one integration per provider pair is an **N×N explosion**. Instead, every provider is
+a **connector** that can *read* (as a source) and *write* (as a destination) in a **canonical
 interchange format**. The engine in the middle is provider-agnostic and pipes source → destination.
 
 Add a new provider = write **one** connector → it works with *every* other provider, both directions.
@@ -23,9 +24,8 @@ Add a new provider = write **one** connector → it works with *every* other pro
 ```mermaid
 graph LR
     subgraph Sources
-        A1[One.com]
-        A2[Loopia]
-        A3[CloudAccess]
+        A1[Host A]
+        A2[Host B]
         A4[Google]
         A5[Microsoft 365]
     end
@@ -33,14 +33,13 @@ graph LR
         H{{"MIME · iCalendar · vCard"}}
     end
     subgraph Destinations
-        B1[One.com]
-        B2[Loopia]
-        B3[Oderland]
+        B1[Host C]
+        B2[Host D]
         B4[Google]
         B5[Microsoft 365]
     end
-    A1 & A2 & A3 & A4 & A5 -->|read| H
-    H -->|write| B1 & B2 & B3 & B4 & B5
+    A1 & A2 & A4 & A5 -->|read| H
+    H -->|write| B1 & B2 & B4 & B5
 ```
 
 ### Canonical formats (already universal standards — we get this for free)
@@ -60,7 +59,7 @@ either end.
 
 | Connector | Covers | Auth | Registration |
 | --- | --- | --- | --- |
-| **Generic IMAP + CalDAV + CardDAV** | One.com, Loopia, CloudAccess, Oderland, Fastmail, and a long tail of standard hosts | User credentials / app password | **None** |
+| **Generic IMAP + CalDAV + CardDAV** | Any standard IMAP/DAV host | User credentials / app password | **None** |
 | **Google** | Gmail / Google Calendar / Contacts | OAuth 2.0 (PKCE) — or app-password + IMAP/CalDAV | One app, registered once by us |
 | **Microsoft 365** | Exchange Online / Outlook | OAuth 2.0 (PKCE) + **Microsoft Graph** (mandatory — Basic Auth is disabled) | One app, registered once by us |
 
@@ -120,7 +119,7 @@ sequenceDiagram
     Eng-->>UI: done + report
 ```
 
-### Integrity & resumability (how we guarantee no loss)
+### Integrity & resumability
 
 - **Checkpointing.** Every processed item ID is recorded in a local SQLite job store. Interrupt at any
   time; resume continues exactly where it stopped.
@@ -149,7 +148,7 @@ graph TD
         ENG --> JOB
         ENG --> SEC
     end
-    CON -.IMAP/CalDAV/CardDAV.-> NET1[(Generic hosts)]
+    CON -.IMAP/CalDAV/CardDAV.-> NET1[(Standard hosts)]
     CON -.OAuth + API.-> NET2[(Google)]
     CON -.OAuth + Graph.-> NET3[(Microsoft 365)]
 ```

@@ -6,10 +6,9 @@
 
 ## The problem
 
-Switching email providers is genuinely painful. Moving mailboxes, calendars, and contacts
-between hosts (One.com → Loopia, CloudAccess → Oderland, Google ↔ Microsoft 365, …) is fiddly,
-risky, and the existing tools are either enterprise-priced, ugly, or aimed at IT admins.
-For small businesses the *fear of losing email or calendar* during the switch is the real blocker.
+Switching email providers is genuinely painful. Moving mailboxes, calendars, and contacts between
+providers is fiddly and risky, and the existing tools are either enterprise-priced, ugly, or aimed at
+IT admins. For small businesses the *fear of losing data* during the switch is the real blocker.
 
 ## The approach
 
@@ -19,7 +18,7 @@ A cross-platform **local desktop app** (Windows / macOS / Linux) that:
 - **Never sees credentials.** They stay on the device (OS keychain); we can't leak what we never hold.
 - Works **any provider → any provider** via a **hub-and-spoke connector architecture**
   (see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)).
-- Guarantees **no data loss** — especially calendar, which is a hard requirement.
+- Is **copy-only, resumable, and verified** — designed to move everything without silently dropping it.
 
 ### Why this shape
 
@@ -39,7 +38,8 @@ A cross-platform **local desktop app** (Windows / macOS / Linux) that:
 ## Status
 
 **Pre-MVP — spec phase (2026-09-13).**
-Next: verify CalDAV/CardDAV support on CloudAccess & Loopia, then build the Generic IMAP connector.
+Next: verify CalDAV/CardDAV support on the first source/destination pair, then build the Generic
+IMAP/DAV connector.
 
 ## Docs
 

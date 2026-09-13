@@ -52,13 +52,13 @@
       <pre class="mermaid">
 graph LR
     subgraph S[Sources]
-      A1[One.com]; A2[Loopia]; A3[CloudAccess]; A4[Google]; A5[Microsoft 365]
+      A1[Host A]; A2[Host B]; A4[Google]; A5[Microsoft 365]
     end
     H{{"Engine<br/>MIME · iCalendar · vCard"}}
     subgraph D[Destinations]
-      B1[Loopia]; B2[Oderland]; B3[Google]; B4[Microsoft 365]
+      B1[Host C]; B2[Host D]; B3[Google]; B4[Microsoft 365]
     end
-    A1 & A2 & A3 & A4 & A5 -->|read| H
+    A1 & A2 & A4 & A5 -->|read| H
     H -->|write| B1 & B2 & B3 & B4
       </pre>
     </div>
@@ -121,11 +121,11 @@ graph TD
     <h2>4. Connectors &amp; auth</h2>
     <table>
       <tr><th>Connector</th><th>Covers</th><th>Auth</th><th>Dev registration</th></tr>
-      <tr><td>Generic IMAP+DAV</td><td>One.com, Loopia, CloudAccess, Oderland, Fastmail…</td><td>User credentials</td><td><b>None</b></td></tr>
+      <tr><td>Generic IMAP+DAV</td><td>Any standard IMAP/DAV host</td><td>User credentials</td><td><b>None</b></td></tr>
       <tr><td>Google</td><td>Gmail / Calendar / Contacts</td><td>OAuth PKCE (or app password)</td><td>1 app, once</td></tr>
       <tr><td>Microsoft 365</td><td>Exchange Online / Outlook</td><td>OAuth PKCE + Graph (required)</td><td>1 Entra app, once</td></tr>
     </table>
-    <p class="note">MVP starts with the Generic connector (CloudAccess → Loopia) — no registrations, real use case. Full detail in <code>docs/MVP-SPEC.md</code>.</p>
+    <p class="note">MVP starts with the Generic connector (standard host → standard host) — no registrations, real use case. Full detail in <code>docs/MVP-SPEC.md</code>.</p>
   </section>
 </div>
 

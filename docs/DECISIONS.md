@@ -21,7 +21,7 @@ jobs, and running heavy work on someone else's machine — all Rust strengths.
 - **Security posture is the pitch** ("credentials never leave your machine") → Tauri's tiny dependency
   surface + memory-safe Rust beats Electron's bundled Chromium/Node + large npm tree.
 - **Data integrity on hours-long jobs** → Rust's error handling makes robust, resumable processes.
-- **Footprint** → lean native process keeps the client's machine usable during a 50 GB move.
+- **Footprint** → lean native process keeps the client's machine usable during a large move.
 - **Perception** → small, fast, native-feeling app for a trust product.
 - UI is a wash (both use a web frontend), so nothing is lost on the interface.
 
@@ -40,13 +40,14 @@ is essentially free. Adding a provider later works with every existing one, both
 
 ## D4 — Start with the Generic IMAP/DAV connector
 
-**Decision:** MVP targets standard hosts first (CloudAccess → Loopia), not Google/M365.
+**Decision:** MVP targets standard IMAP/DAV hosts first, not Google/M365.
 
 **Why:** It needs **no third-party app registration**, it's the real recurring use case, and it avoids
 the OAuth-verification swamp. Google and M365 connectors come after the core works.
 
-## D5 — Never delete the source; verify everything
+## D5 — Copy-only; verify everything
 
 **Decision:** Copy-only, idempotent, checkpointed, with a post-migration verification report.
 
-**Why:** "Losing calendar is unacceptable." No-loss must be structural, not hopeful.
+**Why:** Data integrity must be structural, not hopeful — copy-only, resumable, and verified so
+nothing is silently dropped, and the source is never touched.
