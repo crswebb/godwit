@@ -15,6 +15,7 @@ use reqwest::header::LOCATION;
 use reqwest::redirect::Policy;
 use reqwest::{Method, Url};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::time::Duration;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -37,8 +38,20 @@ pub enum DavKind {
 #[derive(Debug, Serialize)]
 pub struct DavCollection {
     pub name: String,
+    /// Absolute URL of the collection (ready to hand back for migration).
     pub href: String,
     pub count: Option<u32>,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct DavReport {
+    pub total: u32,
+    pub copied: u32,
+    pub skipped: u32,
+    pub failed: u32,
+    /// Source items still absent from the destination after copying
+    /// (independent verification recount). 0 means fully verified.
+    pub missing: u32,
 }
 
 struct ResponseEntry {
@@ -167,10 +180,128 @@ pub fn discover(acc: &DavAccount, kind: DavKind) -> Result<Vec<DavCollection>, S
             let coll_url = base.join(&r.href).map_err(|e| format!("resolving collection: {e}"))?;
             let count = count_items(&client, acc, &coll_url).ok();
             let name = if r.displayname.is_empty() { r.href.clone() } else { r.displayname };
-            out.push(DavCollection { name, href: r.href, count });
+            out.push(DavCollection { name, href: coll_url.to_string(), count });
         }
     }
     Ok(out)
+}
+
+/// Copy every item from one collection to another (both absolute URLs),
+/// deduping by resource name and verifying afterwards. Read-only on the source.
+pub fn migrate(
+    source: &DavAccount,
+    source_collection: &str,
+    destination: &DavAccount,
+    dest_collection: &str,
+    kind: DavKind,
+    dry_run: bool,
+) -> Result<DavReport, String> {
+    let client = http_client()?;
+    let src_coll = Url::parse(source_collection).map_err(|e| format!("bad source URL: {e}"))?;
+    let mut dst_coll = Url::parse(dest_collection).map_err(|e| format!("bad destination URL: {e}"))?;
+    ensure_trailing_slash(&mut dst_coll);
+
+    let src_items = list_item_urls(&client, source, &src_coll)?;
+    let dst_names: HashSet<String> =
+        list_item_urls(&client, destination, &dst_coll)?.iter().map(basename).collect();
+
+    let to_copy: Vec<&Url> = src_items
+        .iter()
+        .filter(|u| {
+            let b = basename(u);
+            !b.is_empty() && !dst_names.contains(&b)
+        })
+        .collect();
+
+    let mut report = DavReport {
+        total: src_items.len() as u32,
+        skipped: (src_items.len() - to_copy.len()) as u32,
+        ..Default::default()
+    };
+
+    if dry_run {
+        report.copied = to_copy.len() as u32;
+        return Ok(report);
+    }
+
+    let content_type = match kind {
+        DavKind::Calendar => "text/calendar; charset=utf-8",
+        DavKind::Contacts => "text/vcard; charset=utf-8",
+    };
+
+    for item in to_copy {
+        let base = basename(item);
+        // GET from source.
+        let got = client
+            .get(item.clone())
+            .basic_auth(&source.username, Some(&source.password))
+            .send()
+            .map_err(|e| format!("GET {item} failed: {e}"))?;
+        if !got.status().is_success() {
+            report.failed += 1;
+            continue;
+        }
+        let bytes = got.bytes().map_err(|e| format!("reading {item}: {e}"))?;
+
+        // PUT to destination under the same resource name.
+        let target = dst_coll.join(&base).map_err(|e| format!("resolving PUT target: {e}"))?;
+        let put = client
+            .put(target)
+            .basic_auth(&destination.username, Some(&destination.password))
+            .header("Content-Type", content_type)
+            .body(bytes.to_vec())
+            .send()
+            .map_err(|e| format!("PUT failed: {e}"))?;
+        if put.status().is_success() {
+            report.copied += 1;
+        } else {
+            report.failed += 1;
+        }
+    }
+
+    // Verification: re-read the destination and confirm every source item is there.
+    let dst_after: HashSet<String> =
+        list_item_urls(&client, destination, &dst_coll)?.iter().map(basename).collect();
+    report.missing = src_items
+        .iter()
+        .map(basename)
+        .filter(|b| !b.is_empty() && !dst_after.contains(b))
+        .count() as u32;
+
+    Ok(report)
+}
+
+/// List the absolute URLs of the item resources (.ics/.vcf) in a collection.
+fn list_item_urls(client: &Client, acc: &DavAccount, coll: &Url) -> Result<Vec<Url>, String> {
+    let body = r#"<?xml version="1.0" encoding="utf-8"?><d:propfind xmlns:d="DAV:"><d:prop><d:getcontenttype/></d:prop></d:propfind>"#;
+    let (xml, _) = propfind(client, acc, coll, "1", body)?;
+    let mut urls = Vec::new();
+    for r in parse_responses(&xml) {
+        let is_item = r.contenttype.contains("calendar")
+            || r.contenttype.contains("vcard")
+            || r.href.ends_with(".ics")
+            || r.href.ends_with(".vcf");
+        if is_item {
+            let u = coll.join(&r.href).map_err(|e| format!("resolving item: {e}"))?;
+            urls.push(u);
+        }
+    }
+    Ok(urls)
+}
+
+/// Last non-empty path segment of a URL (the resource file name).
+fn basename(u: &Url) -> String {
+    u.path_segments()
+        .and_then(|segments| segments.filter(|s| !s.is_empty()).last())
+        .unwrap_or("")
+        .to_string()
+}
+
+fn ensure_trailing_slash(u: &mut Url) {
+    if !u.path().ends_with('/') {
+        let p = format!("{}/", u.path());
+        u.set_path(&p);
+    }
 }
 
 /// Count items in a collection via a Depth:1 PROPFIND (items carry a content

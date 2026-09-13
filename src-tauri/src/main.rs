@@ -382,9 +382,31 @@ async fn dav_discover(
         .map_err(|e| format!("task failed: {e}"))?
 }
 
+/// Copy all items from one CalDAV/CardDAV collection to another.
+#[tauri::command]
+async fn dav_migrate(
+    source: dav::DavAccount,
+    source_collection: String,
+    destination: dav::DavAccount,
+    dest_collection: String,
+    kind: dav::DavKind,
+    dry_run: bool,
+) -> Result<dav::DavReport, String> {
+    tokio::task::spawn_blocking(move || {
+        dav::migrate(&source, &source_collection, &destination, &dest_collection, kind, dry_run)
+    })
+    .await
+    .map_err(|e| format!("task failed: {e}"))?
+}
+
 fn main() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![list_folders, migrate, dav_discover])
+        .invoke_handler(tauri::generate_handler![
+            list_folders,
+            migrate,
+            dav_discover,
+            dav_migrate
+        ])
         .run(tauri::generate_context!())
         .expect("error while running Godwit");
 }

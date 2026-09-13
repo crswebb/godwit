@@ -2,7 +2,7 @@
   import { invoke } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
   import AccountForm, { type Creds } from "./lib/AccountForm.svelte";
-  import DavExplorer from "./lib/DavExplorer.svelte";
+  import DavMigrate from "./lib/DavMigrate.svelte";
 
   type FolderReport = {
     folder: string;
@@ -218,7 +218,7 @@
 
   <details class="dav-section">
     <summary>Calendar &amp; contacts (experimental)</summary>
-    <DavExplorer />
+    <DavMigrate />
   </details>
 </main>
 
