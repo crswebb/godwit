@@ -25,6 +25,10 @@ tokio = { version = "1", features = ["rt", "rt-multi-thread"] }
 imap = "2.4"
 native-tls = "0.2"
 
+# CalDAV / CardDAV: HTTP (PROPFIND/REPORT/GET/PUT) + XML multistatus parsing.
+reqwest = { version = "0.12", default-features = true, features = ["blocking"] }
+quick-xml = "0.36"
+
 [profile.release]
 codegen-units = 1
 lto = true

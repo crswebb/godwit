@@ -1,6 +1,8 @@
 // Prevents an extra console window on Windows in release builds.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod dav;
+
 use std::collections::HashSet;
 use std::net::TcpStream;
 
@@ -369,9 +371,20 @@ fn map_flags(src: &[Flag]) -> Vec<Flag<'static>> {
     out
 }
 
+/// Discover the calendars or address books for a CalDAV/CardDAV account.
+#[tauri::command]
+async fn dav_discover(
+    account: dav::DavAccount,
+    kind: dav::DavKind,
+) -> Result<Vec<dav::DavCollection>, String> {
+    tokio::task::spawn_blocking(move || dav::discover(&account, kind))
+        .await
+        .map_err(|e| format!("task failed: {e}"))?
+}
+
 fn main() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![list_folders, migrate])
+        .invoke_handler(tauri::generate_handler![list_folders, migrate, dav_discover])
         .run(tauri::generate_context!())
         .expect("error while running Godwit");
 }

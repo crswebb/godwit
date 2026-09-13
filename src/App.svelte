@@ -2,6 +2,7 @@
   import { invoke } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
   import AccountForm, { type Creds } from "./lib/AccountForm.svelte";
+  import DavExplorer from "./lib/DavExplorer.svelte";
 
   type FolderReport = {
     folder: string;
@@ -214,6 +215,11 @@
       {/if}
     </section>
   {/if}
+
+  <details class="dav-section">
+    <summary>Calendar &amp; contacts (experimental)</summary>
+    <DavExplorer />
+  </details>
 </main>
 
 <style>
@@ -399,5 +405,18 @@
   .warnings li {
     margin-bottom: 3px;
     word-break: break-word;
+  }
+
+  .dav-section {
+    margin-top: 32px;
+    border-top: 1px solid var(--line);
+    padding-top: 16px;
+  }
+
+  .dav-section summary {
+    cursor: pointer;
+    font-weight: 600;
+    font-size: 0.92rem;
+    color: var(--muted);
   }
 </style>
