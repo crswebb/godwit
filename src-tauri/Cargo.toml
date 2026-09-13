@@ -29,6 +29,9 @@ native-tls = "0.2"
 reqwest = { version = "0.12", default-features = true, features = ["blocking"] }
 quick-xml = "0.36"
 
+# DNS SRV lookups for mail-server autodiscovery (RFC 6186).
+hickory-resolver = "0.24"
+
 [profile.release]
 codegen-units = 1
 lto = true
