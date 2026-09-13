@@ -161,7 +161,13 @@
       {#if doneFolders.length}
         <table>
           <thead>
-            <tr><th>Folder</th><th>Source</th><th>Copied</th><th>Skipped</th><th>Failed</th></tr>
+            <tr>
+              <th>Folder</th>
+              <th>Source</th>
+              <th>{dryRun ? "Would copy" : "Copied"}</th>
+              <th>{dryRun ? "Already there" : "Skipped"}</th>
+              <th>Failed</th>
+            </tr>
           </thead>
           <tbody>
             {#each doneFolders as f (f.folder)}
@@ -183,7 +189,11 @@
             {dryRun ? "Preview complete" : "Migration complete"}
           </strong>
           <span>
-            {report.copied} copied · {report.skipped} skipped · {report.failed} failed
+            {#if dryRun}
+              {report.copied} would copy · {report.skipped} already there · {report.failed} failed
+            {:else}
+              {report.copied} copied · {report.skipped} skipped (already there) · {report.failed} failed
+            {/if}
             across {report.folders.length} folders.
           </span>
         </div>

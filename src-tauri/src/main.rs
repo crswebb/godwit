@@ -257,7 +257,9 @@ fn copy_folder(
             }
 
             if opts.dry_run {
-                fr.skipped += 1;
+                // Preview: this message is not a duplicate, so it *would* be
+                // copied. (Duplicates were already counted as skipped above.)
+                fr.copied += 1;
             } else {
                 let flags = map_flags(m.flags());
                 match dst.append_with_flags_and_date(name, body, &flags, m.internal_date()) {
