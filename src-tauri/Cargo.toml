@@ -26,11 +26,17 @@ imap = "2.4"
 native-tls = "0.2"
 
 # CalDAV / CardDAV: HTTP (PROPFIND/REPORT/GET/PUT) + XML multistatus parsing.
-reqwest = { version = "0.12", default-features = true, features = ["blocking"] }
+reqwest = { version = "0.12", default-features = true, features = ["blocking", "json"] }
 quick-xml = "0.36"
 
 # DNS SRV lookups for mail-server autodiscovery (RFC 6186).
 hickory-resolver = "0.24"
+
+# Microsoft 365 OAuth 2.0 (PKCE) + Graph.
+sha2 = "0.10"
+base64 = "0.22"
+rand = "0.8"
+open = "5"
 
 [profile.release]
 codegen-units = 1

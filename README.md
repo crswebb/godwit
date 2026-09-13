@@ -91,4 +91,5 @@ then calendar + contacts (Phase 2). Also: fill in `docs/providers/` for the firs
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — system design, connector model, data flow, security.
 - [`docs/MVP-SPEC.md`](docs/MVP-SPEC.md) — phased scope, auth matrix, first-migration test plan.
 - [`docs/DECISIONS.md`](docs/DECISIONS.md) — key decisions and their rationale.
+- [`docs/microsoft-setup.md`](docs/microsoft-setup.md) — one-time Microsoft 365 (Entra) app registration.
 - [`docs/architecture-diagram.html`](docs/architecture-diagram.html) — rendered diagrams for quick viewing.

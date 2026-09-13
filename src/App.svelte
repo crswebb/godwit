@@ -2,6 +2,7 @@
   import { invoke } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
   import AccountEntry, { type Account, blankAccount } from "./lib/AccountEntry.svelte";
+  import MicrosoftPanel from "./lib/MicrosoftPanel.svelte";
 
   type FolderInfo = { name: string; delimiter: string | null; attributes: string[] };
   type DavCollection = { name: string; href: string; count: number | null };
@@ -290,6 +291,11 @@
       {/if}
     </section>
   {/if}
+
+  <details class="ms-section">
+    <summary>Microsoft 365 (experimental)</summary>
+    <MicrosoftPanel />
+  </details>
 </main>
 
 {#snippet statusCard(side: "source" | "dest", account: Account, probe: Probe)}
@@ -448,4 +454,7 @@
   .warnings { font-size: 0.83rem; color: var(--muted); }
   .warnings ul { margin: 8px 0 0; padding-left: 18px; }
   .warnings li { margin-bottom: 3px; word-break: break-word; }
+
+  .ms-section { margin-top: 32px; border-top: 1px solid var(--line); padding-top: 16px; }
+  .ms-section summary { cursor: pointer; font-weight: 600; font-size: 0.92rem; color: var(--muted); }
 </style>

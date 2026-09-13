@@ -3,6 +3,7 @@
 
 mod autoconfig;
 mod dav;
+mod microsoft;
 
 use std::collections::HashSet;
 use std::net::TcpStream;
@@ -493,9 +494,25 @@ fn run_blocking(
     Ok(report)
 }
 
+/// Sign in to a Microsoft 365 account via OAuth (opens the system browser).
+#[tauri::command]
+async fn ms_sign_in(client_id: String) -> Result<microsoft::MsAccount, String> {
+    tokio::task::spawn_blocking(move || microsoft::sign_in(&client_id))
+        .await
+        .map_err(|e| format!("task failed: {e}"))?
+}
+
+/// Discover mail folders, calendars, and contact folders for a signed-in M365 account.
+#[tauri::command]
+async fn ms_probe(email: String) -> Result<microsoft::MsProbe, String> {
+    tokio::task::spawn_blocking(move || microsoft::probe(&email))
+        .await
+        .map_err(|e| format!("task failed: {e}"))?
+}
+
 fn main() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![probe, run_migration])
+        .invoke_handler(tauri::generate_handler![probe, run_migration, ms_sign_in, ms_probe])
         .run(tauri::generate_context!())
         .expect("error while running Godwit");
 }
