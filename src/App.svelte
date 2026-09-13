@@ -46,6 +46,14 @@
       destination.email.trim() !== "" && destination.password !== "" && !probing && !running,
   );
 
+  // Same address on both sides = a domain move between providers. Autodiscovery
+  // keys off the domain, so it can't tell the two servers apart — the user must
+  // set them explicitly.
+  const sameEmail = $derived(
+    source.email.trim() !== "" &&
+      source.email.trim().toLowerCase() === destination.email.trim().toLowerCase(),
+  );
+
   function normalize(a: Account): Account {
     const clean = (s: string | null) => (s && s.trim() !== "" ? s.trim() : null);
     return { ...a, imapHost: clean(a.imapHost), davUrl: clean(a.davUrl), imapPort: a.imapPort || null };
@@ -191,6 +199,13 @@
   {#if sourceProbe && destProbe}
     <section class="found">
       <h2>What we found</h2>
+      {#if sameEmail}
+        <p class="callout">
+          Both accounts use the same address — this looks like a domain move between providers.
+          Autodiscovery can't tell the two servers apart, so set each mail server below and press
+          <em>Try again</em>.
+        </p>
+      {/if}
       <div class="cards">
         {@render statusCard("source", source, sourceProbe)}
         {@render statusCard("dest", destination, destProbe)}
@@ -310,18 +325,24 @@
       </li>
     </ul>
 
-    {#if probe.imap.status !== "ok" || probe.calendars.status !== "ok" || probe.contacts.status !== "ok"}
+    <details class="servers" open={probe.imap.status !== "ok" || sameEmail}>
+      <summary>Adjust servers</summary>
       <div class="fixers">
-        <p class="fix-hint">Fill in what's missing to include it — or leave it and migrate the rest.</p>
-        {#if probe.imap.status !== "ok"}
-          <input type="text" bind:value={account.imapHost} placeholder="Mail server (e.g. imap.example.com)" spellcheck="false" autocomplete="off" />
-        {/if}
-        {#if probe.calendars.status !== "ok" || probe.contacts.status !== "ok"}
-          <input type="text" bind:value={account.davUrl} placeholder="Calendar/contacts URL (e.g. https://caldav.example.com/)" spellcheck="false" autocomplete="off" />
-        {/if}
+        <p class="fix-hint">
+          Detected automatically where possible. Edit and press <em>Try again</em> to point at a
+          specific server — leave a line blank to skip that part.
+        </p>
+        <label class="f">
+          <span>Mail server (IMAP)</span>
+          <input type="text" bind:value={account.imapHost} placeholder="imap.example.com" spellcheck="false" autocomplete="off" />
+        </label>
+        <label class="f">
+          <span>Calendar / contacts URL</span>
+          <input type="text" bind:value={account.davUrl} placeholder="https://caldav.example.com/" spellcheck="false" autocomplete="off" />
+        </label>
         <button class="try" onclick={() => retry(side)} disabled={busy || running}>{busy ? "Trying…" : "Try again"}</button>
       </div>
-    {/if}
+    </details>
   </div>
 {/snippet}
 
@@ -375,8 +396,14 @@
   .ok { color: var(--accent); font-weight: 600; }
   .miss { color: var(--muted); }
 
-  .fixers { margin-top: 12px; display: flex; flex-direction: column; gap: 8px; border-top: 1px solid var(--line); padding-top: 10px; }
+  .callout { margin: 0 0 12px; padding: 11px 13px; border-radius: 10px; background: color-mix(in srgb, var(--accent) 14%, transparent); font-size: 0.85rem; }
+  .callout em { font-style: normal; font-weight: 600; }
+
+  .servers { margin-top: 12px; border-top: 1px solid var(--line); padding-top: 10px; }
+  .servers summary { cursor: pointer; font-size: 0.8rem; color: var(--muted); }
+  .fixers { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
   .fix-hint { margin: 0; font-size: 0.78rem; color: var(--muted); }
+  .fixers .f { display: flex; flex-direction: column; gap: 4px; font-size: 0.78rem; color: var(--muted); }
   .fixers input {
     padding: 7px 9px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--ink); font-size: 0.82rem;
   }
