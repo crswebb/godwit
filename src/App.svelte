@@ -1,7 +1,7 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
-  import AccountEntry, { type Account } from "./lib/AccountEntry.svelte";
+  import AccountEntry, { type Account, blankAccount } from "./lib/AccountEntry.svelte";
 
   type FolderInfo = { name: string; delimiter: string | null; attributes: string[] };
   type DavCollection = { name: string; href: string; count: number | null };
@@ -21,16 +21,13 @@
     | { type: "phase"; label: string }
     | { type: "warning"; message: string };
 
-  const blank = (): Account => ({ email: "", password: "", imapHost: null, imapPort: null, davUrl: null });
+  let source = $state<Account>(blankAccount());
+  let destination = $state<Account>(blankAccount());
 
-  let source = $state<Account>(blank());
-  let destination = $state<Account>(blank());
-
-  let probing = $state(false);
+  let probing = $state<"source" | "dest" | "both" | null>(null);
   let sourceProbe = $state<Probe | null>(null);
   let destProbe = $state<Probe | null>(null);
 
-  // Selection state, keyed by folder name / source collection href.
   let folderChecked = $state<Record<string, boolean>>({});
   let calChecked = $state<Record<string, boolean>>({});
   let abChecked = $state<Record<string, boolean>>({});
@@ -40,7 +37,6 @@
   let error = $state<string | null>(null);
   let report = $state<UnifiedReport | null>(null);
 
-  // Live progress
   let current = $state<{ name: string; done: number; total: number } | null>(null);
   let phase = $state<string | null>(null);
   let warnings = $state<string[]>([]);
@@ -55,40 +51,65 @@
     return { ...a, imapHost: clean(a.imapHost), davUrl: clean(a.davUrl), imapPort: a.imapPort || null };
   }
 
-  function destMatch(list: DavCollection[] | undefined, name: string): string | null {
-    return list?.find((c) => c.name === name)?.href ?? null;
+  const destMatch = (list: DavCollection[] | undefined, name: string) =>
+    list?.find((c) => c.name === name)?.href ?? null;
+
+  // Is there anything discovered on the source worth showing a plan for?
+  function anyDiscovered(): boolean {
+    return !!(
+      sourceProbe &&
+      (sourceProbe.imap.folders.length ||
+        sourceProbe.calendars.collections.length ||
+        sourceProbe.contacts.collections.length)
+    );
+  }
+
+  function syncHost(account: Account, probe: Probe) {
+    if (probe.imap.status === "ok") { account.imapHost = probe.imap.host; account.imapPort = probe.imap.port; }
+  }
+
+  function initSelection() {
+    if (!sourceProbe || !destProbe) return;
+    folderChecked = {};
+    for (const f of sourceProbe.imap.folders) folderChecked[f.name] = true;
+    calChecked = {};
+    for (const c of sourceProbe.calendars.collections) calChecked[c.href] = destMatch(destProbe.calendars.collections, c.name) !== null;
+    abChecked = {};
+    for (const c of sourceProbe.contacts.collections) abChecked[c.href] = destMatch(destProbe.contacts.collections, c.name) !== null;
   }
 
   async function connect() {
-    probing = true;
+    probing = "both";
     error = null;
     report = null;
-    sourceProbe = null;
-    destProbe = null;
     try {
       const [sp, dp] = await Promise.all([
         invoke<Probe>("probe", { account: normalize(source) }),
         invoke<Probe>("probe", { account: normalize(destination) }),
       ]);
-      sourceProbe = sp;
-      destProbe = dp;
-
-      // Remember discovered mail servers so migration uses them directly.
-      if (sp.imap.status === "ok") { source.imapHost = sp.imap.host; source.imapPort = sp.imap.port; }
-      if (dp.imap.status === "ok") { destination.imapHost = dp.imap.host; destination.imapPort = dp.imap.port; }
-
-      // Default selection: all source folders; calendars/address books that
-      // have a matching collection on the destination.
-      folderChecked = {};
-      for (const f of sp.imap.folders) folderChecked[f.name] = true;
-      calChecked = {};
-      for (const c of sp.calendars.collections) calChecked[c.href] = destMatch(dp.calendars.collections, c.name) !== null;
-      abChecked = {};
-      for (const c of sp.contacts.collections) abChecked[c.href] = destMatch(dp.contacts.collections, c.name) !== null;
+      sourceProbe = sp; syncHost(source, sp);
+      destProbe = dp; syncHost(destination, dp);
+      initSelection();
     } catch (err) {
       error = typeof err === "string" ? err : String(err);
     } finally {
-      probing = false;
+      probing = null;
+    }
+  }
+
+  async function retry(side: "source" | "dest") {
+    probing = side;
+    error = null;
+    try {
+      const acc = side === "source" ? source : destination;
+      const p = await invoke<Probe>("probe", { account: normalize(acc) });
+      if (side === "source") { sourceProbe = p; syncHost(source, p); }
+      else { destProbe = p; syncHost(destination, p); }
+      initSelection();
+    } catch (err) {
+      error = typeof err === "string" ? err : String(err);
+    } finally {
+      probing = null;
     }
   }
 
@@ -116,17 +137,11 @@
 
   async function migrate() {
     if (!sourceProbe || !destProbe) return;
-    running = true;
-    error = null;
-    report = null;
-    warnings = [];
-    current = null;
-    phase = null;
+    running = true; error = null; report = null; warnings = []; current = null; phase = null;
 
     const folders = sourceProbe.imap.folders.filter((f) => folderChecked[f.name]).map((f) => f.name);
     const pairs = (src: DavCollection[], dst: DavCollection[], checked: Record<string, boolean>) =>
-      src
-        .filter((c) => checked[c.href])
+      src.filter((c) => checked[c.href])
         .map((c) => ({ name: c.name, source: c.href, dest: destMatch(dst, c.name) }))
         .filter((p): p is { name: string; source: string; dest: string } => p.dest !== null);
 
@@ -138,17 +153,12 @@
 
     try {
       report = await invoke<UnifiedReport>("run_migration", {
-        source: normalize(source),
-        destination: normalize(destination),
-        selection,
-        dryRun,
+        source: normalize(source), destination: normalize(destination), selection, dryRun,
       });
     } catch (err) {
       error = typeof err === "string" ? err : String(err);
     } finally {
-      running = false;
-      current = null;
-      phase = null;
+      running = false; current = null; phase = null;
     }
   }
 </script>
@@ -157,20 +167,20 @@
   <header>
     <h1>Godwit</h1>
     <p class="tagline">
-      Move email, calendars, and contacts from one account to another. Enter both accounts, connect,
-      then choose what to bring across. The source is only ever read.
+      Move email, calendars, and contacts between two accounts. Enter both, connect, and pick what to
+      bring across. The source is only ever read.
     </p>
   </header>
 
   <div class="accounts">
-    <AccountEntry label="Source" bind:account={source} needsHost={sourceProbe?.imap.status === "needsHost"} disabled={probing || running} />
+    <AccountEntry label="Source" bind:account={source} disabled={!!probing || running} />
     <div class="arrow" aria-hidden="true">→</div>
-    <AccountEntry label="Destination" bind:account={destination} needsHost={destProbe?.imap.status === "needsHost"} disabled={probing || running} />
+    <AccountEntry label="Destination" bind:account={destination} disabled={!!probing || running} />
   </div>
 
   <div class="connect-row">
     <button onclick={connect} disabled={!canConnect}>
-      {probing ? "Connecting…" : sourceProbe ? "Reconnect" : "Connect"}
+      {probing === "both" ? "Connecting…" : sourceProbe ? "Reconnect" : "Connect"}
     </button>
   </div>
 
@@ -179,49 +189,48 @@
   {/if}
 
   {#if sourceProbe && destProbe}
-    {@const sp = sourceProbe}
-    {@const dp = destProbe}
-    <section class="plan">
-      <h2>What to migrate</h2>
+    <section class="found">
+      <h2>What we found</h2>
+      <div class="cards">
+        {@render statusCard("source", source, sourceProbe)}
+        {@render statusCard("dest", destination, destProbe)}
+      </div>
+    </section>
 
-      <!-- Email -->
-      <div class="group">
-        <h3>Email folders</h3>
-        {#if sp.imap.status === "ok"}
-          {#if sp.imap.folders.length === 0}
-            <p class="muted">No folders found.</p>
-          {:else}
+    {#if selectionCount > 0 || anyDiscovered()}
+      <section class="plan">
+        <h2>Choose what to migrate</h2>
+
+        <div class="group">
+          <h3>Email folders</h3>
+          {#if sourceProbe.imap.status === "ok" && sourceProbe.imap.folders.length}
             <ul class="checklist">
-              {#each sp.imap.folders as f (f.name)}
+              {#each sourceProbe.imap.folders as f (f.name)}
                 <li><label><input type="checkbox" bind:checked={folderChecked[f.name]} disabled={running} /> {f.name}</label></li>
               {/each}
             </ul>
-            {#if dp.imap.status !== "ok"}
-              <p class="muted note">Destination mail server not reachable yet — email won't copy until it is (check Destination → Advanced).</p>
+            {#if destProbe.imap.status !== "ok"}
+              <p class="muted note">Destination email isn't ready — add its mail server above to include email.</p>
             {/if}
+          {:else}
+            <p class="muted">Nothing to migrate here.</p>
           {/if}
-        {:else if sp.imap.status === "needsHost"}
-          <p class="muted">Enter the source mail server (Source → Advanced) and reconnect.</p>
-        {:else}
-          <p class="muted">Couldn't read email: {sp.imap.error}</p>
-        {/if}
+        </div>
+
+        {@render davGroup("Calendars", sourceProbe.calendars, destProbe.calendars, calChecked)}
+        {@render davGroup("Address books", sourceProbe.contacts, destProbe.contacts, abChecked)}
+      </section>
+
+      <div class="controls">
+        <label class="dry">
+          <input type="checkbox" bind:checked={dryRun} disabled={running} />
+          <span><strong>Dry run</strong> — count what would copy, write nothing.</span>
+        </label>
+        <button onclick={migrate} disabled={selectionCount === 0 || running}>
+          {running ? "Migrating…" : dryRun ? `Preview (${selectionCount})` : `Migrate (${selectionCount})`}
+        </button>
       </div>
-
-      <!-- Calendars -->
-      {@render davGroup("Calendars", sp.calendars, dp.calendars, calChecked)}
-      <!-- Address books -->
-      {@render davGroup("Address books", sp.contacts, dp.contacts, abChecked)}
-    </section>
-
-    <div class="controls">
-      <label class="dry">
-        <input type="checkbox" bind:checked={dryRun} disabled={running} />
-        <span><strong>Dry run</strong> — count what would copy, write nothing.</span>
-      </label>
-      <button onclick={migrate} disabled={selectionCount === 0 || running}>
-        {running ? "Migrating…" : dryRun ? `Preview (${selectionCount})` : `Migrate (${selectionCount})`}
-      </button>
-    </div>
+    {/if}
   {/if}
 
   {#if running || report}
@@ -268,28 +277,72 @@
   {/if}
 </main>
 
+{#snippet statusCard(side: "source" | "dest", account: Account, probe: Probe)}
+  {@const busy = probing === side}
+  <div class="card">
+    <div class="card-head">{account.email}</div>
+    <ul class="status-list">
+      <li>
+        <span class="lbl">Email</span>
+        {#if probe.imap.status === "ok"}
+          <span class="ok">✓ {probe.imap.folders.length} folder{probe.imap.folders.length === 1 ? "" : "s"}</span>
+        {:else if probe.imap.status === "needsHost"}
+          <span class="miss">couldn't find the mail server</span>
+        {:else}
+          <span class="miss">error: {probe.imap.error}</span>
+        {/if}
+      </li>
+      <li>
+        <span class="lbl">Calendars</span>
+        {#if probe.calendars.status === "ok"}
+          <span class="ok">✓ {probe.calendars.collections.length}</span>
+        {:else}
+          <span class="miss">not available</span>
+        {/if}
+      </li>
+      <li>
+        <span class="lbl">Contacts</span>
+        {#if probe.contacts.status === "ok"}
+          <span class="ok">✓ {probe.contacts.collections.length}</span>
+        {:else}
+          <span class="miss">not available</span>
+        {/if}
+      </li>
+    </ul>
+
+    {#if probe.imap.status !== "ok" || probe.calendars.status !== "ok" || probe.contacts.status !== "ok"}
+      <div class="fixers">
+        <p class="fix-hint">Fill in what's missing to include it — or leave it and migrate the rest.</p>
+        {#if probe.imap.status !== "ok"}
+          <input type="text" bind:value={account.imapHost} placeholder="Mail server (e.g. imap.example.com)" spellcheck="false" autocomplete="off" />
+        {/if}
+        {#if probe.calendars.status !== "ok" || probe.contacts.status !== "ok"}
+          <input type="text" bind:value={account.davUrl} placeholder="Calendar/contacts URL (e.g. https://caldav.example.com/)" spellcheck="false" autocomplete="off" />
+        {/if}
+        <button class="try" onclick={() => retry(side)} disabled={busy || running}>{busy ? "Trying…" : "Try again"}</button>
+      </div>
+    {/if}
+  </div>
+{/snippet}
+
 {#snippet davGroup(title: string, srcProbe: DavProbe, dstProbe: DavProbe, checked: Record<string, boolean>)}
   <div class="group">
     <h3>{title}</h3>
-    {#if srcProbe.status === "ok"}
-      {#if srcProbe.collections.length === 0}
-        <p class="muted">None found.</p>
-      {:else}
-        <ul class="checklist">
-          {#each srcProbe.collections as c (c.href)}
-            {@const dest = dstProbe.collections.find((d) => d.name === c.name)?.href ?? null}
-            <li>
-              <label class:disabled={!dest}>
-                <input type="checkbox" bind:checked={checked[c.href]} disabled={running || !dest} />
-                {c.name}{c.count === null ? "" : ` (${c.count})`}
-                {#if dest}<span class="arrow-to">→ {c.name}</span>{:else}<span class="muted small">no matching item on destination</span>{/if}
-              </label>
-            </li>
-          {/each}
-        </ul>
-      {/if}
+    {#if srcProbe.status === "ok" && srcProbe.collections.length}
+      <ul class="checklist">
+        {#each srcProbe.collections as c (c.href)}
+          {@const dest = dstProbe.collections.find((d) => d.name === c.name)?.href ?? null}
+          <li>
+            <label class:disabled={!dest}>
+              <input type="checkbox" bind:checked={checked[c.href]} disabled={running || !dest} />
+              {c.name}{c.count === null ? "" : ` (${c.count})`}
+              {#if dest}<span class="arrow-to">→ {c.name}</span>{:else}<span class="muted small">no match on destination</span>{/if}
+            </label>
+          </li>
+        {/each}
+      </ul>
     {:else}
-      <p class="muted">Not available for the source account.</p>
+      <p class="muted">Nothing to migrate here.</p>
     {/if}
   </div>
 {/snippet}
@@ -311,8 +364,26 @@
 
   .error { margin-top: 16px; padding: 12px 14px; border-radius: 10px; background: var(--danger-bg); color: var(--danger); font-size: 0.9rem; }
 
+  .found { margin-top: 26px; }
+  .found h2, .plan h2 { font-size: 1.15rem; margin: 0 0 10px; }
+  .cards { display: flex; gap: 12px; }
+  .card { flex: 1; min-width: 0; border: 1px solid var(--line); border-radius: 12px; padding: 14px; background: var(--card); }
+  .card-head { font-weight: 600; font-size: 0.85rem; margin-bottom: 8px; word-break: break-all; }
+  .status-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 5px; }
+  .status-list li { display: flex; justify-content: space-between; font-size: 0.85rem; }
+  .lbl { color: var(--muted); }
+  .ok { color: var(--accent); font-weight: 600; }
+  .miss { color: var(--muted); }
+
+  .fixers { margin-top: 12px; display: flex; flex-direction: column; gap: 8px; border-top: 1px solid var(--line); padding-top: 10px; }
+  .fix-hint { margin: 0; font-size: 0.78rem; color: var(--muted); }
+  .fixers input {
+    padding: 7px 9px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--ink); font-size: 0.82rem;
+  }
+  .fixers input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+  .try { align-self: flex-start; padding: 7px 13px; font-size: 0.85rem; }
+
   .plan { margin-top: 26px; }
-  .plan h2 { font-size: 1.15rem; margin: 0 0 10px; }
   .group { margin-bottom: 18px; }
   .group h3 { font-size: 0.95rem; margin: 0 0 8px; }
 
