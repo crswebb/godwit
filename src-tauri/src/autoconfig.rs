@@ -38,8 +38,43 @@ pub fn discover_imap(email: &str) -> Option<ImapServer> {
         return Some(s);
     }
 
-    // 3. Central ISPDB.
-    fetch_autoconfig(&format!("https://autoconfig.thunderbird.net/v1.1/{domain}"))
+    // 3. Central ISPDB by the domain.
+    if let Some(s) = fetch_autoconfig(&ispdb_url(domain)) {
+        return Some(s);
+    }
+
+    // 4. MX -> provider domain -> ISPDB. Catches custom domains whose mail is
+    // hosted by a big provider (e.g. MX at *.mail.protection.outlook.com => the
+    // domain is on Microsoft 365; *.google.com => Gmail).
+    if let Some(mx_domain) = mx_provider_domain(domain) {
+        if mx_domain != domain {
+            if let Some(s) = fetch_autoconfig(&ispdb_url(&mx_domain)) {
+                return Some(s);
+            }
+        }
+    }
+
+    None
+}
+
+fn ispdb_url(domain: &str) -> String {
+    format!("https://autoconfig.thunderbird.net/v1.1/{domain}")
+}
+
+/// Look up the domain's mail provider via its MX record, returning the MX
+/// host's registrable-ish domain (last two labels) — e.g. "outlook.com".
+fn mx_provider_domain(domain: &str) -> Option<String> {
+    let resolver = Resolver::new(ResolverConfig::default(), ResolverOpts::default()).ok()?;
+    let mx = resolver.mx_lookup(domain).ok()?;
+    let best = mx.iter().min_by_key(|r| r.preference())?;
+    let host = best.exchange().to_utf8();
+    let host = host.trim_end_matches('.');
+    let labels: Vec<&str> = host.split('.').collect();
+    if labels.len() >= 2 {
+        Some(format!("{}.{}", labels[labels.len() - 2], labels[labels.len() - 1]))
+    } else {
+        None
+    }
 }
 
 fn fetch_autoconfig(url: &str) -> Option<ImapServer> {
