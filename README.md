@@ -1,6 +1,9 @@
-# Flyttfågel
+# Godwit
 
-> **Codename** (Swedish for *migratory bird*) — rename freely.
+> **Why "Godwit"?** The bar-tailed godwit holds the record for the **longest non-stop flight of any
+> animal** — crossing oceans without landing, carrying everything the whole way without dropping a
+> thing. That's the promise: get all of it across, intact.
+>
 > A privacy-first **desktop app** that migrates **email, calendar, and contacts** between *any*
 > mail providers, in *any* direction — without your data or credentials ever touching a server.
 

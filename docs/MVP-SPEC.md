@@ -85,7 +85,8 @@ Record findings in `docs/providers/` (one file per provider).
 - **Core (Rust):** `tokio` (async), `async-imap` + `mail-parser` / `mail-builder` (email),
   `reqwest` + `quick-xml` for CalDAV/CardDAV (DAV client crates are immature — likely hand-roll
   PROPFIND/REPORT), `rusqlite` (job store), `keyring` (secrets), `oauth2` (PKCE flows).
-- **Frontend:** _open_ — SvelteKit (lean) or React + Vite. Recommend SvelteKit for footprint.
+- **Frontend:** Svelte + Vite (SPA — no SvelteKit/SSR needed for a desktop app). Chosen for its
+  closeness to plain HTML/CSS/JS and lean output.
 - **Mail-engine fallback option:** bundle **`imapsync`** for the mail heavy-lifting if native Rust
   IMAP edge-case coverage proves risky (see Risks).
 
@@ -105,7 +106,6 @@ Record findings in `docs/providers/` (one file per provider).
 
 ## Open questions
 
-1. Frontend framework: SvelteKit vs. React?
-2. Native Rust IMAP vs. bundled `imapsync` for Phase 1 — decide after the spike.
-3. Licensing/distribution model (free / paid / per-migration) — deferred, not urgent given goals.
-4. Product name (Flyttfågel is a codename).
+1. Native Rust IMAP vs. bundled `imapsync` for Phase 1 — decide after the spike.
+2. Licensing/distribution model (free / paid / per-migration) — deferred, not urgent given goals.
+3. Domain — leaning `godwit.email`; not yet registered.
