@@ -38,11 +38,49 @@ A cross-platform **local desktop app** (Windows / macOS / Linux) that:
   small footprint, and native feel. See [`docs/DECISIONS.md`](docs/DECISIONS.md).
 - **Connector architecture** with standard interchange formats (MIME / iCalendar / vCard).
 
+## Getting started (development)
+
+**Prerequisites:** [Node](https://nodejs.org) 20+ and the [Rust toolchain](https://rustup.rs). On
+macOS, Xcode Command Line Tools are also needed (`xcode-select --install`).
+
+If you don't have Rust yet:
+
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+```
+
+Then:
+
+```bash
+npm install          # frontend deps
+npm run tauri dev    # compiles the Rust core and launches the app (first build is slow)
+```
+
+The current app (Phase 0 spike) shows a form: enter an IMAP host, port, username, and password, and
+it lists the mailbox's folders. Everything runs locally; nothing is sent anywhere.
+
+> **Icons** in `src-tauri/icons/` are solid-colour placeholders. Before the first `tauri build`,
+> regenerate the full platform set (incl. `.icns`/`.ico`) from a real logo:
+> `npm run tauri icon ./path-to-logo.png`.
+
+## Project layout
+
+```
+godwit/
+├─ src/              # Svelte + Vite frontend (UI only)
+├─ src-tauri/        # Rust core — all network I/O and heavy lifting
+│  ├─ src/main.rs    # Tauri commands (currently: list_folders)
+│  ├─ Cargo.toml
+│  └─ tauri.conf.json
+└─ docs/             # architecture, MVP spec, decisions, provider notes
+```
+
 ## Status
 
-**Pre-MVP — spec phase (2026-09-13).**
-Next: verify CalDAV/CardDAV support on the first source/destination pair, then build the Generic
-IMAP/DAV connector.
+**Pre-MVP — Phase 0 spike (2026-09-13).**
+Working: connect to an IMAP box over TLS and list its folders.
+Next: fill in `docs/providers/` for the first host pair (CalDAV/CardDAV check), then grow the Generic
+connector toward a full email migration (Phase 1).
 
 ## Docs
 

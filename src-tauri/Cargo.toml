@@ -1,0 +1,32 @@
+[package]
+name = "godwit"
+version = "0.1.0"
+description = "Privacy-first email, calendar & contacts migration"
+authors = ["Stefan Bergfeldt"]
+edition = "2021"
+rust-version = "1.77"
+
+# The desktop binary. (A lib target is only needed once we add mobile.)
+[[bin]]
+name = "godwit"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt", "rt-multi-thread"] }
+
+# IMAP: the mature, sync `imap` crate wrapped in spawn_blocking for the spike.
+# (Native-vs-imapsync is an open decision to revisit after this — see docs/MVP-SPEC.md.)
+imap = "2.4"
+native-tls = "0.2"
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true

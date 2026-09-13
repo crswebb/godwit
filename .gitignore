@@ -2,7 +2,9 @@
 /target
 /src-tauri/target
 **/*.rs.bk
-Cargo.lock
+# Cargo.lock IS committed — this is an application, not a library.
+# Tauri generated schemas
+/src-tauri/gen/schemas
 
 # Node / frontend
 node_modules/
