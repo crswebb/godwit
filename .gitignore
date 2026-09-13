@@ -1,0 +1,26 @@
+# Rust / Tauri
+/target
+/src-tauri/target
+**/*.rs.bk
+Cargo.lock
+
+# Node / frontend
+node_modules/
+dist/
+.vite/
+*.local
+
+# Secrets / env — never commit
+.env
+.env.*
+*.pem
+*.key
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.idea/
+.vscode/*
+!.vscode/extensions.json

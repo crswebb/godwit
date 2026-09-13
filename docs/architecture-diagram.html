@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Flyttfågel — Architecture</title>
+<style>
+  :root {
+    --bg: #f7f7f5; --card: #ffffff; --ink: #1a1a17; --muted: #6b6b63;
+    --line: #e3e3dc; --accent: #2f6f4f; --accent-soft: #e7f1ea;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14140f; --card: #1e1e18; --ink: #ececdf; --muted: #a0a094;
+      --line: #33332a; --accent: #7fc4a0; --accent-soft: #1c2a22;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+    font: 16px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; }
+  .wrap { max-width: 900px; margin: 0 auto; padding: 28px 18px 64px; }
+  header h1 { margin: 0 0 4px; font-size: 1.7rem; letter-spacing: -0.02em; }
+  header p { margin: 0; color: var(--muted); }
+  .tag { display: inline-block; margin-top: 10px; padding: 3px 10px; border-radius: 999px;
+    background: var(--accent-soft); color: var(--accent); font-size: 0.8rem; font-weight: 600; }
+  section { background: var(--card); border: 1px solid var(--line); border-radius: 14px;
+    padding: 20px; margin-top: 22px; }
+  section h2 { margin: 0 0 4px; font-size: 1.15rem; }
+  section .sub { margin: 0 0 16px; color: var(--muted); font-size: 0.92rem; }
+  .diagram { overflow-x: auto; background: var(--bg); border-radius: 10px; padding: 12px; }
+  .mermaid { text-align: center; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.9rem; margin-top: 6px; }
+  th, td { text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; }
+  code { background: var(--accent-soft); color: var(--accent); padding: 1px 5px; border-radius: 5px;
+    font-size: 0.85em; }
+  .note { font-size: 0.85rem; color: var(--muted); margin-top: 12px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Flyttfågel</h1>
+    <p>Privacy-first, local migration of email · calendar · contacts — any provider to any provider.</p>
+    <span class="tag">Architecture overview · 2026-09-13</span>
+  </header>
+
+  <section>
+    <h2>1. Hub-and-spoke connectors</h2>
+    <p class="sub">One connector per provider — not one tool per pair. Add a provider once, it works with all of them, both directions.</p>
+    <div class="diagram">
+      <pre class="mermaid">
+graph LR
+    subgraph S[Sources]
+      A1[One.com]; A2[Loopia]; A3[CloudAccess]; A4[Google]; A5[Microsoft 365]
+    end
+    H{{"Engine<br/>MIME · iCalendar · vCard"}}
+    subgraph D[Destinations]
+      B1[Loopia]; B2[Oderland]; B3[Google]; B4[Microsoft 365]
+    end
+    A1 & A2 & A3 & A4 & A5 -->|read| H
+    H -->|write| B1 & B2 & B3 & B4
+      </pre>
+    </div>
+    <table>
+      <tr><th>Data</th><th>Canonical format</th></tr>
+      <tr><td>Email</td><td><code>MIME / RFC 5322</code> — IMAP, Gmail, Graph all accept raw MIME</td></tr>
+      <tr><td>Calendar</td><td><code>iCalendar / ICS</code> — CalDAV, Google, Graph all speak it</td></tr>
+      <tr><td>Contacts</td><td><code>vCard</code> — CardDAV, Google People, Graph all map to it</td></tr>
+    </table>
+  </section>
+
+  <section>
+    <h2>2. A migration job — data flow</h2>
+    <p class="sub">Streamed, checkpointed, idempotent, verified. Source is never deleted.</p>
+    <div class="diagram">
+      <pre class="mermaid">
+sequenceDiagram
+    participant UI as UI (webview)
+    participant Eng as Engine (Rust)
+    participant Src as Source
+    participant Dst as Destination
+    UI->>Eng: Start (source, dest, scope)
+    Eng->>Src: connect / list folders, calendars, contacts
+    Eng->>Dst: connect / ensure targets exist
+    loop per folder / calendar
+      Eng->>Src: read items (stream, batched)
+      Src-->>Eng: raw MIME / ICS / vCard
+      Eng->>Dst: write (dedup by Message-ID / UID)
+      Eng-->>UI: progress + counts
+    end
+    Eng->>Eng: verify counts, flags, structure
+    Eng-->>UI: done + report
+      </pre>
+    </div>
+  </section>
+
+  <section>
+    <h2>3. Components — all on the user's machine</h2>
+    <p class="sub">The web UI can't open sockets, so all network I/O lives in the Rust core. Credentials stay in the OS keychain.</p>
+    <div class="diagram">
+      <pre class="mermaid">
+graph TD
+    subgraph Device["User's machine — Tauri app"]
+      UI["Web UI (frontend)"]
+      subgraph Core["Rust core"]
+        ENG[Migration engine]; CON[Connector registry]
+        JOB[(Job store · SQLite)]; SEC[[Secrets → OS keychain]]
+      end
+      UI <-->|Tauri IPC| ENG
+      ENG --> CON & JOB & SEC
+    end
+    CON -. IMAP/CalDAV/CardDAV .-> N1[(Generic hosts)]
+    CON -. OAuth + API .-> N2[(Google)]
+    CON -. OAuth + Graph .-> N3[(Microsoft 365)]
+      </pre>
+    </div>
+  </section>
+
+  <section>
+    <h2>4. Connectors &amp; auth</h2>
+    <table>
+      <tr><th>Connector</th><th>Covers</th><th>Auth</th><th>Dev registration</th></tr>
+      <tr><td>Generic IMAP+DAV</td><td>One.com, Loopia, CloudAccess, Oderland, Fastmail…</td><td>User credentials</td><td><b>None</b></td></tr>
+      <tr><td>Google</td><td>Gmail / Calendar / Contacts</td><td>OAuth PKCE (or app password)</td><td>1 app, once</td></tr>
+      <tr><td>Microsoft 365</td><td>Exchange Online / Outlook</td><td>OAuth PKCE + Graph (required)</td><td>1 Entra app, once</td></tr>
+    </table>
+    <p class="note">MVP starts with the Generic connector (CloudAccess → Loopia) — no registrations, real use case. Full detail in <code>docs/MVP-SPEC.md</code>.</p>
+  </section>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/mermaid/10.9.1/mermaid.min.js"></script>
+<script>
+  const dark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+  mermaid.initialize({ startOnLoad: true, theme: dark ? 'dark' : 'neutral', securityLevel: 'strict' });
+</script>
+</body>
+</html>
