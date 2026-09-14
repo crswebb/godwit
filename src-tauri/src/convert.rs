@@ -4,6 +4,7 @@
 //! live Graph connection.
 
 use serde_json::{json, Value};
+use std::collections::HashMap;
 
 // --- Contacts: Graph <-> vCard --------------------------------------------
 
@@ -100,7 +101,7 @@ fn parse_vcard_lines(vcard: &str) -> Vec<(String, String, String)> {
                 Some((n, p)) => (n.to_string(), p.to_string()),
                 None => (head.to_string(), String::new()),
             };
-            out.push((name.to_uppercase(), params.to_uppercase(), value.to_string()));
+            out.push((name.to_uppercase(), params, value.to_string()));
         }
     }
     out
@@ -134,9 +135,10 @@ pub fn vcard_to_graph_contact(vcard: &str) -> Value {
                 }
             }
             "TEL" => {
-                if params.contains("CELL") || params.contains("MOBILE") {
+                let p = params.to_uppercase();
+                if p.contains("CELL") || p.contains("MOBILE") {
                     mobile = Some(value);
-                } else if params.contains("HOME") {
+                } else if p.contains("HOME") {
                     home.push(value);
                 } else {
                     business.push(value);
@@ -179,6 +181,312 @@ pub fn contact_key(vcard: &str) -> String {
         }
     }
     fn_val
+}
+
+// --- Calendar: Graph <-> iCalendar ----------------------------------------
+//
+// Times are normalised to UTC on the way out of Graph (request with
+// Prefer: outlook.timezone="UTC"), which avoids Windows<->IANA timezone
+// mapping. v1 covers non-recurring and all-day events, and the common
+// recurrence patterns (daily/weekly/monthly/yearly + interval + count/until +
+// weekly BYDAY). UID is preserved to a DAV destination; Microsoft assigns its
+// own iCalUId on create, so dedup into M365 is best-effort.
+
+const GRAPH_DAYS: [(&str, &str); 7] = [
+    ("sunday", "SU"), ("monday", "MO"), ("tuesday", "TU"), ("wednesday", "WE"),
+    ("thursday", "TH"), ("friday", "FR"), ("saturday", "SA"),
+];
+
+fn graph_day_to_ics(d: &str) -> Option<&'static str> {
+    GRAPH_DAYS.iter().find(|(g, _)| d.eq_ignore_ascii_case(g)).map(|(_, i)| *i)
+}
+fn ics_day_to_graph(d: &str) -> Option<&'static str> {
+    let d = d.trim_start_matches(|c: char| c == '+' || c == '-' || c.is_ascii_digit());
+    GRAPH_DAYS.iter().find(|(_, i)| d.eq_ignore_ascii_case(i)).map(|(g, _)| *g)
+}
+
+fn graph_dt_to_ics_utc(s: &str) -> String {
+    if s.len() >= 19 {
+        format!("{}{}{}T{}{}{}Z", &s[0..4], &s[5..7], &s[8..10], &s[11..13], &s[14..16], &s[17..19])
+    } else {
+        s.to_string()
+    }
+}
+fn graph_date_to_ics(s: &str) -> String {
+    if s.len() >= 10 { format!("{}{}{}", &s[0..4], &s[5..7], &s[8..10]) } else { s.to_string() }
+}
+fn ics_utc_to_graph(s: &str) -> String {
+    let s = s.trim_end_matches('Z');
+    if s.len() >= 15 {
+        format!("{}-{}-{}T{}:{}:{}", &s[0..4], &s[4..6], &s[6..8], &s[9..11], &s[11..13], &s[13..15])
+    } else {
+        s.to_string()
+    }
+}
+fn ics_local_to_graph(s: &str) -> String {
+    // "YYYYMMDDTHHMMSS" (no zone)
+    if s.len() >= 15 {
+        format!("{}-{}-{}T{}:{}:{}", &s[0..4], &s[4..6], &s[6..8], &s[9..11], &s[11..13], &s[13..15])
+    } else {
+        s.to_string()
+    }
+}
+fn ics_date_to_graph(s: &str) -> String {
+    if s.len() >= 8 { format!("{}-{}-{}T00:00:00", &s[0..4], &s[4..6], &s[6..8]) } else { s.to_string() }
+}
+
+fn strip_html(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut in_tag = false;
+    for c in s.chars() {
+        match c {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            _ if !in_tag => out.push(c),
+            _ => {}
+        }
+    }
+    out.replace("&nbsp;", " ").replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">").trim().to_string()
+}
+
+fn relative_byday(pat: &Value) -> Option<String> {
+    let idx = pat.get("index").and_then(Value::as_str).unwrap_or("first");
+    let n = match idx {
+        "first" => "1", "second" => "2", "third" => "3", "fourth" => "4", "last" => "-1", _ => "1",
+    };
+    let day = pat.get("daysOfWeek")?.as_array()?.iter()
+        .filter_map(|x| x.as_str()).filter_map(graph_day_to_ics).next()?;
+    Some(format!("{n}{day}"))
+}
+
+fn graph_recurrence_to_rrule(rec: &Value) -> Option<String> {
+    let pat = rec.get("pattern")?;
+    let typ = pat.get("type")?.as_str()?;
+    let interval = pat.get("interval").and_then(Value::as_u64).unwrap_or(1);
+    let mut parts = Vec::new();
+    match typ {
+        "daily" => parts.push("FREQ=DAILY".to_string()),
+        "weekly" => {
+            parts.push("FREQ=WEEKLY".to_string());
+            if let Some(days) = pat.get("daysOfWeek").and_then(Value::as_array) {
+                let d: Vec<&str> = days.iter().filter_map(|x| x.as_str()).filter_map(graph_day_to_ics).collect();
+                if !d.is_empty() { parts.push(format!("BYDAY={}", d.join(","))); }
+            }
+        }
+        "absoluteMonthly" => {
+            parts.push("FREQ=MONTHLY".to_string());
+            if let Some(d) = pat.get("dayOfMonth").and_then(Value::as_u64) { parts.push(format!("BYMONTHDAY={d}")); }
+        }
+        "relativeMonthly" => {
+            parts.push("FREQ=MONTHLY".to_string());
+            if let Some(bd) = relative_byday(pat) { parts.push(format!("BYDAY={bd}")); }
+        }
+        "absoluteYearly" => {
+            parts.push("FREQ=YEARLY".to_string());
+            if let Some(m) = pat.get("month").and_then(Value::as_u64) { parts.push(format!("BYMONTH={m}")); }
+            if let Some(d) = pat.get("dayOfMonth").and_then(Value::as_u64) { parts.push(format!("BYMONTHDAY={d}")); }
+        }
+        "relativeYearly" => {
+            parts.push("FREQ=YEARLY".to_string());
+            if let Some(m) = pat.get("month").and_then(Value::as_u64) { parts.push(format!("BYMONTH={m}")); }
+            if let Some(bd) = relative_byday(pat) { parts.push(format!("BYDAY={bd}")); }
+        }
+        _ => return None,
+    }
+    if interval > 1 { parts.push(format!("INTERVAL={interval}")); }
+    if let Some(range) = rec.get("range") {
+        match range.get("type").and_then(Value::as_str) {
+            Some("numbered") => {
+                if let Some(n) = range.get("numberOfOccurrences").and_then(Value::as_u64) {
+                    if n > 0 { parts.push(format!("COUNT={n}")); }
+                }
+            }
+            Some("endDate") => {
+                if let Some(ed) = range.get("endDate").and_then(Value::as_str) {
+                    parts.push(format!("UNTIL={}", graph_date_to_ics(ed)));
+                }
+            }
+            _ => {}
+        }
+    }
+    Some(parts.join(";"))
+}
+
+fn rrule_to_graph_recurrence(rrule: &str, start_date: &str) -> Option<Value> {
+    let mut map: HashMap<String, String> = HashMap::new();
+    for kv in rrule.split(';') {
+        if let Some((k, v)) = kv.split_once('=') {
+            map.insert(k.trim().to_uppercase(), v.trim().to_string());
+        }
+    }
+    let freq = map.get("FREQ")?.to_uppercase();
+    let interval = map.get("INTERVAL").and_then(|s| s.parse::<u64>().ok()).unwrap_or(1);
+    let mut pattern = serde_json::Map::new();
+    pattern.insert("interval".into(), json!(interval));
+    match freq.as_str() {
+        "DAILY" => { pattern.insert("type".into(), json!("daily")); }
+        "WEEKLY" => {
+            pattern.insert("type".into(), json!("weekly"));
+            if let Some(bd) = map.get("BYDAY") {
+                let days: Vec<Value> = bd.split(',').filter_map(ics_day_to_graph).map(|g| json!(g)).collect();
+                if !days.is_empty() { pattern.insert("daysOfWeek".into(), json!(days)); }
+            }
+        }
+        "MONTHLY" => {
+            pattern.insert("type".into(), json!("absoluteMonthly"));
+            let dom = map.get("BYMONTHDAY").and_then(|s| s.parse::<u64>().ok()).unwrap_or(1);
+            pattern.insert("dayOfMonth".into(), json!(dom));
+        }
+        "YEARLY" => {
+            pattern.insert("type".into(), json!("absoluteYearly"));
+            if let Some(m) = map.get("BYMONTH").and_then(|s| s.parse::<u64>().ok()) { pattern.insert("month".into(), json!(m)); }
+            let dom = map.get("BYMONTHDAY").and_then(|s| s.parse::<u64>().ok()).unwrap_or(1);
+            pattern.insert("dayOfMonth".into(), json!(dom));
+        }
+        _ => return None,
+    }
+    let mut range = serde_json::Map::new();
+    range.insert("startDate".into(), json!(start_date));
+    if let Some(c) = map.get("COUNT").and_then(|s| s.parse::<u64>().ok()) {
+        range.insert("type".into(), json!("numbered"));
+        range.insert("numberOfOccurrences".into(), json!(c));
+    } else if let Some(u) = map.get("UNTIL") {
+        range.insert("type".into(), json!("endDate"));
+        let d = &u[..u.len().min(8)];
+        range.insert("endDate".into(), json!(format!("{}-{}-{}", &d[0..4], &d[4..6], &d[6..8])));
+    } else {
+        range.insert("type".into(), json!("noEnd"));
+    }
+    Some(json!({ "pattern": Value::Object(pattern), "range": Value::Object(range) }))
+}
+
+/// Convert a Graph `event` resource to an iCalendar (VCALENDAR/VEVENT) string.
+pub fn graph_event_to_ics(e: &Value) -> String {
+    let mut v = vec![
+        "BEGIN:VCALENDAR".to_string(),
+        "VERSION:2.0".to_string(),
+        "PRODID:-//Godwit//EN".to_string(),
+        "BEGIN:VEVENT".to_string(),
+    ];
+    let uid = str_field(e, "iCalUId").or_else(|| str_field(e, "id")).unwrap_or_default();
+    v.push(format!("UID:{}", escape_vcard(&uid)));
+
+    let stamp = str_field(e, "lastModifiedDateTime")
+        .or_else(|| e.get("start").and_then(|s| str_field(s, "dateTime")))
+        .map(|s| graph_dt_to_ics_utc(&s))
+        .unwrap_or_default();
+    if !stamp.is_empty() { v.push(format!("DTSTAMP:{stamp}")); }
+
+    if let Some(s) = str_field(e, "subject") { v.push(format!("SUMMARY:{}", escape_vcard(&s))); }
+
+    let all_day = e.get("isAllDay").and_then(Value::as_bool).unwrap_or(false);
+    let start_dt = e.get("start").and_then(|s| str_field(s, "dateTime"));
+    let end_dt = e.get("end").and_then(|s| str_field(s, "dateTime"));
+    if all_day {
+        if let Some(s) = &start_dt { v.push(format!("DTSTART;VALUE=DATE:{}", graph_date_to_ics(s))); }
+        if let Some(s) = &end_dt { v.push(format!("DTEND;VALUE=DATE:{}", graph_date_to_ics(s))); }
+    } else {
+        if let Some(s) = &start_dt { v.push(format!("DTSTART:{}", graph_dt_to_ics_utc(s))); }
+        if let Some(s) = &end_dt { v.push(format!("DTEND:{}", graph_dt_to_ics_utc(s))); }
+    }
+
+    if let Some(loc) = e.get("location").and_then(|l| str_field(l, "displayName")) {
+        v.push(format!("LOCATION:{}", escape_vcard(&loc)));
+    }
+    if let Some(body) = e.get("body") {
+        if let Some(content) = str_field(body, "content") {
+            let text = if body.get("contentType").and_then(Value::as_str) == Some("html") {
+                strip_html(&content)
+            } else {
+                content
+            };
+            if !text.is_empty() { v.push(format!("DESCRIPTION:{}", escape_vcard(&text))); }
+        }
+    }
+    if let Some(rec) = e.get("recurrence") {
+        if !rec.is_null() {
+            if let Some(rrule) = graph_recurrence_to_rrule(rec) {
+                v.push(format!("RRULE:{rrule}"));
+            }
+        }
+    }
+
+    v.push("END:VEVENT".to_string());
+    v.push("END:VCALENDAR".to_string());
+    v.join("\r\n")
+}
+
+/// Convert an iCalendar VEVENT string to a Graph `event` resource.
+pub fn ics_to_graph_event(ics: &str) -> Value {
+    let mut subject = String::new();
+    let mut location = String::new();
+    let mut description = String::new();
+    let mut start = json!(null);
+    let mut end = json!(null);
+    let mut all_day = false;
+    let mut rrule: Option<String> = None;
+    let mut start_date = String::new();
+
+    for (name, params, value) in parse_vcard_lines(ics) {
+        let up = params.to_uppercase();
+        match name.as_str() {
+            "SUMMARY" => subject = unescape_vcard(&value),
+            "LOCATION" => location = unescape_vcard(&value),
+            "DESCRIPTION" => description = unescape_vcard(&value),
+            "RRULE" => rrule = Some(value),
+            "DTSTART" | "DTEND" => {
+                let (dt, tz, day) = if up.contains("VALUE=DATE") {
+                    all_day = true;
+                    (ics_date_to_graph(&value), "UTC".to_string(), true)
+                } else if value.ends_with('Z') {
+                    (ics_utc_to_graph(&value), "UTC".to_string(), false)
+                } else if let Some(tzid) = params.split(';').find_map(|p| p.strip_prefix("TZID=")) {
+                    (ics_local_to_graph(&value), tzid.to_string(), false)
+                } else {
+                    (ics_local_to_graph(&value), "UTC".to_string(), false)
+                };
+                let obj = json!({ "dateTime": dt, "timeZone": tz });
+                if name == "DTSTART" {
+                    start_date = if day { value[..value.len().min(8)].to_string() } else { dt_date(&dt) };
+                    start = obj;
+                } else {
+                    end = obj;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut obj = serde_json::Map::new();
+    obj.insert("subject".into(), json!(subject));
+    if !start.is_null() { obj.insert("start".into(), start); }
+    if !end.is_null() { obj.insert("end".into(), end); }
+    obj.insert("isAllDay".into(), json!(all_day));
+    if !location.is_empty() { obj.insert("location".into(), json!({ "displayName": location })); }
+    if !description.is_empty() {
+        obj.insert("body".into(), json!({ "contentType": "text", "content": description }));
+    }
+    if let Some(r) = rrule {
+        let sd = if start_date.len() >= 10 { start_date } else { String::new() };
+        if let Some(rec) = rrule_to_graph_recurrence(&r, &sd) {
+            obj.insert("recurrence".into(), rec);
+        }
+    }
+    Value::Object(obj)
+}
+
+fn dt_date(graph_dt: &str) -> String {
+    if graph_dt.len() >= 10 { graph_dt[..10].to_string() } else { graph_dt.to_string() }
+}
+
+/// A dedup key for a calendar item: its UID.
+pub fn event_key(ics: &str) -> String {
+    for (name, _p, value) in parse_vcard_lines(ics) {
+        if name == "UID" {
+            return unescape_vcard(&value).trim().to_lowercase();
+        }
+    }
+    String::new()
 }
 
 #[cfg(test)]
@@ -241,5 +549,65 @@ mod tests {
         assert_eq!(contact_key(v), "bob@example.com");
         let v2 = "BEGIN:VCARD\nFN:Just A Name\nEND:VCARD";
         assert_eq!(contact_key(v2), "just a name");
+    }
+
+    #[test]
+    fn graph_event_to_ics_timed() {
+        let e = json!({
+            "iCalUId": "EVT-1",
+            "subject": "Standup",
+            "isAllDay": false,
+            "start": { "dateTime": "2026-09-14T09:00:00.0000000", "timeZone": "UTC" },
+            "end": { "dateTime": "2026-09-14T09:15:00.0000000", "timeZone": "UTC" },
+            "location": { "displayName": "Room 1" }
+        });
+        let ics = graph_event_to_ics(&e);
+        assert!(ics.contains("UID:EVT-1"));
+        assert!(ics.contains("SUMMARY:Standup"));
+        assert!(ics.contains("DTSTART:20260914T090000Z"));
+        assert!(ics.contains("DTEND:20260914T091500Z"));
+        assert!(ics.contains("LOCATION:Room 1"));
+    }
+
+    #[test]
+    fn graph_event_all_day() {
+        let e = json!({
+            "iCalUId": "EVT-2", "subject": "Holiday", "isAllDay": true,
+            "start": { "dateTime": "2026-12-24T00:00:00.0000000", "timeZone": "UTC" },
+            "end": { "dateTime": "2026-12-25T00:00:00.0000000", "timeZone": "UTC" }
+        });
+        let ics = graph_event_to_ics(&e);
+        assert!(ics.contains("DTSTART;VALUE=DATE:20261224"));
+        assert!(ics.contains("DTEND;VALUE=DATE:20261225"));
+    }
+
+    #[test]
+    fn weekly_recurrence_round_trips() {
+        let rec = json!({
+            "pattern": { "type": "weekly", "interval": 1, "daysOfWeek": ["monday", "wednesday"] },
+            "range": { "type": "numbered", "startDate": "2026-09-14", "numberOfOccurrences": 10 }
+        });
+        let rrule = graph_recurrence_to_rrule(&rec).unwrap();
+        assert!(rrule.contains("FREQ=WEEKLY"));
+        assert!(rrule.contains("BYDAY=MO,WE"));
+        assert!(rrule.contains("COUNT=10"));
+
+        let back = rrule_to_graph_recurrence(&rrule, "2026-09-14").unwrap();
+        assert_eq!(back["pattern"]["type"], "weekly");
+        assert_eq!(back["range"]["numberOfOccurrences"], 10);
+        let days = back["pattern"]["daysOfWeek"].as_array().unwrap();
+        assert!(days.contains(&json!("monday")) && days.contains(&json!("wednesday")));
+    }
+
+    #[test]
+    fn ics_to_graph_event_timed() {
+        let ics = "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:X1\r\nSUMMARY:Review\r\nDTSTART:20260914T130000Z\r\nDTEND:20260914T140000Z\r\nLOCATION:HQ\r\nEND:VEVENT\r\nEND:VCALENDAR";
+        let e = ics_to_graph_event(ics);
+        assert_eq!(e["subject"], "Review");
+        assert_eq!(e["start"]["dateTime"], "2026-09-14T13:00:00");
+        assert_eq!(e["start"]["timeZone"], "UTC");
+        assert_eq!(e["isAllDay"], false);
+        assert_eq!(e["location"]["displayName"], "HQ");
+        assert_eq!(event_key(ics), "x1");
     }
 }

@@ -59,9 +59,6 @@
       source.email.trim().toLowerCase() === destination.email.trim().toLowerCase(),
   );
 
-  // Contacts migrate across DAV and Microsoft 365 (vCard <-> Graph).
-  // Calendars are still CalDAV-only (M365 Graph<->iCalendar is the next pass).
-  const calendarSupported = $derived(source.provider !== "microsoft" && destination.provider !== "microsoft");
 
   function normalize(a: Account): Account {
     const clean = (s: string | null) => (s && s.trim() !== "" ? s.trim() : null);
@@ -90,7 +87,7 @@
     folderChecked = {};
     for (const f of sourceProbe.imap.folders) folderChecked[f.name] = true;
     calChecked = {};
-    for (const c of sourceProbe.calendars.collections) calChecked[c.href] = calendarSupported && destMatch(destProbe.calendars.collections, c.name) !== null;
+    for (const c of sourceProbe.calendars.collections) calChecked[c.href] = destMatch(destProbe.calendars.collections, c.name) !== null;
     abChecked = {};
     for (const c of sourceProbe.contacts.collections) abChecked[c.href] = destMatch(destProbe.contacts.collections, c.name) !== null;
   }
@@ -241,8 +238,8 @@
           {/if}
         </div>
 
-        {@render davGroup("Calendars", sourceProbe.calendars, destProbe.calendars, calChecked, calendarSupported)}
-        {@render davGroup("Address books", sourceProbe.contacts, destProbe.contacts, abChecked, true)}
+        {@render davGroup("Calendars", sourceProbe.calendars, destProbe.calendars, calChecked)}
+        {@render davGroup("Address books", sourceProbe.contacts, destProbe.contacts, abChecked)}
       </section>
 
       <div class="controls">
@@ -358,12 +355,10 @@
   </div>
 {/snippet}
 
-{#snippet davGroup(title: string, srcProbe: DavProbe, dstProbe: DavProbe, checked: Record<string, boolean>, supported: boolean)}
+{#snippet davGroup(title: string, srcProbe: DavProbe, dstProbe: DavProbe, checked: Record<string, boolean>)}
   <div class="group">
     <h3>{title}</h3>
-    {#if !supported}
-      <p class="muted">Not available yet when a Microsoft 365 account is involved.</p>
-    {:else if srcProbe.status === "ok" && srcProbe.collections.length}
+    {#if srcProbe.status === "ok" && srcProbe.collections.length}
       <ul class="checklist">
         {#each srcProbe.collections as c (c.href)}
           {@const dest = dstProbe.collections.find((d) => d.name === c.name)?.href ?? null}

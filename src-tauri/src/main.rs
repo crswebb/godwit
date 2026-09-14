@@ -482,35 +482,14 @@ fn run_blocking(
         report.folders = migrate_mail(app, reader.as_mut(), writer.as_mut(), &pairs, dry_run);
     }
 
-    // Calendar/contacts run over CalDAV/CardDAV. M365 (Graph JSON) conversion
-    // isn't built yet, so skip those pairs with a clear warning.
-    let dav_ok = !source.is_microsoft() && !destination.is_microsoft();
-    let src_dav = dav_account(&source);
-    let dst_dav = dav_account(&destination);
+    // Calendars and contacts both flow across DAV and Microsoft 365 via a
+    // canonical format (iCalendar / vCard).
+    for pair in &selection.calendars {
+        emit(app, Progress::Phase { label: pair.name.clone() });
+        let r = migrate_calendar(app, &source, &destination, pair, dry_run);
+        report.calendars.push(NamedDavReport { name: pair.name.clone(), report: r });
+    }
 
-    let run_dav = |app: &tauri::AppHandle, pairs: &[DavPair], kind: dav::DavKind, out: &mut Vec<NamedDavReport>| {
-        for pair in pairs {
-            if !dav_ok {
-                emit(app, Progress::Warning {
-                    message: format!("{}: Microsoft 365 calendar/contacts migration isn't supported yet — skipped.", pair.name),
-                });
-                out.push(NamedDavReport { name: pair.name.clone(), report: dav::DavReport::default() });
-                continue;
-            }
-            emit(app, Progress::Phase { label: format!("{}", pair.name) });
-            let r = dav::migrate(&src_dav, &pair.source, &dst_dav, &pair.dest, kind, dry_run)
-                .unwrap_or_else(|e| {
-                    emit(app, Progress::Warning { message: format!("{}: {e}", pair.name) });
-                    dav::DavReport::default()
-                });
-            out.push(NamedDavReport { name: pair.name.clone(), report: r });
-        }
-    };
-
-    // Calendars: CalDAV only for now (M365 Graph<->iCalendar is the next pass).
-    run_dav(app, &selection.calendars, dav::DavKind::Calendar, &mut report.calendars);
-
-    // Contacts: works across DAV and Microsoft 365 (vCard <-> Graph).
     for pair in &selection.contacts {
         emit(app, Progress::Phase { label: pair.name.clone() });
         let r = migrate_contacts(app, &source, &destination, pair, dry_run);
@@ -518,6 +497,97 @@ fn run_blocking(
     }
 
     Ok(report)
+}
+
+/// Read a side's calendar items as iCalendar strings, from DAV or M365.
+fn read_side_events(account: &Account, collection: &str) -> Result<Vec<String>, String> {
+    if account.is_microsoft() {
+        Ok(microsoft::list_events(&account.email)?
+            .iter()
+            .map(convert::graph_event_to_ics)
+            .collect())
+    } else {
+        dav::read_items(&dav_account(account), collection)
+    }
+}
+
+/// Write one calendar item (given as iCalendar) to a side, DAV or M365.
+fn write_side_event(account: &Account, collection: &str, ics: &str) -> Result<(), String> {
+    if account.is_microsoft() {
+        microsoft::create_event(&account.email, &convert::ics_to_graph_event(ics))
+    } else {
+        let key = convert::event_key(ics);
+        let base = if key.is_empty() { "event".to_string() } else { sanitize_name(&key) };
+        dav::write_item(
+            &dav_account(account),
+            collection,
+            &format!("{base}.ics"),
+            "text/calendar; charset=utf-8",
+            ics,
+        )
+    }
+}
+
+fn migrate_calendar(
+    app: &tauri::AppHandle,
+    source: &Account,
+    destination: &Account,
+    pair: &DavPair,
+    dry_run: bool,
+) -> dav::DavReport {
+    let src = match read_side_events(source, &pair.source) {
+        Ok(v) => v,
+        Err(e) => {
+            emit(app, Progress::Warning { message: format!("{}: {e}", pair.name) });
+            return dav::DavReport::default();
+        }
+    };
+    let dst_keys: std::collections::HashSet<String> = match read_side_events(destination, &pair.dest) {
+        Ok(v) => v.iter().map(|c| convert::event_key(c)).filter(|k| !k.is_empty()).collect(),
+        Err(e) => {
+            emit(app, Progress::Warning { message: format!("{}: {e}", pair.name) });
+            return dav::DavReport::default();
+        }
+    };
+
+    let to_copy: Vec<&String> = src
+        .iter()
+        .filter(|c| {
+            let k = convert::event_key(c);
+            !k.is_empty() && !dst_keys.contains(&k)
+        })
+        .collect();
+
+    let mut report = dav::DavReport {
+        total: src.len() as u32,
+        skipped: (src.len() - to_copy.len()) as u32,
+        ..Default::default()
+    };
+    if dry_run {
+        report.copied = to_copy.len() as u32;
+        return report;
+    }
+
+    for c in &to_copy {
+        match write_side_event(destination, &pair.dest, c) {
+            Ok(()) => report.copied += 1,
+            Err(e) => {
+                report.failed += 1;
+                emit(app, Progress::Warning { message: format!("{}: {e}", pair.name) });
+            }
+        }
+    }
+
+    if let Ok(after) = read_side_events(destination, &pair.dest) {
+        let after_keys: std::collections::HashSet<String> =
+            after.iter().map(|c| convert::event_key(c)).collect();
+        report.missing = src
+            .iter()
+            .map(|c| convert::event_key(c))
+            .filter(|k| !k.is_empty() && !after_keys.contains(k))
+            .count() as u32;
+    }
+    report
 }
 
 fn sanitize_name(s: &str) -> String {

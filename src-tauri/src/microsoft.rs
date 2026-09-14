@@ -344,3 +344,50 @@ pub fn create_contact(email: &str, contact: &Value) -> Result<(), String> {
         Err(format!("contact create -> HTTP {}", resp.status().as_u16()))
     }
 }
+
+/// List events in the account's default calendar (series masters + single
+/// events), with times normalised to UTC via the outlook.timezone preference.
+pub fn list_events(email: &str) -> Result<Vec<Value>, String> {
+    let access = valid_access(email)?;
+    let client = reqwest::blocking::Client::new();
+    let select = "id,iCalUId,subject,body,start,end,isAllDay,location,recurrence,lastModifiedDateTime";
+    let mut url = format!("{GRAPH}/me/events?$select={select}&$top=50");
+    let mut out = Vec::new();
+    loop {
+        let resp = client
+            .get(&url)
+            .bearer_auth(&access)
+            .header("Prefer", "outlook.timezone=\"UTC\"")
+            .send()
+            .map_err(|e| format!("events GET: {e}"))?;
+        if !resp.status().is_success() {
+            return Err(format!("events -> HTTP {}", resp.status().as_u16()));
+        }
+        let v: Value = resp.json().map_err(|e| format!("events parse: {e}"))?;
+        if let Some(arr) = v["value"].as_array() {
+            out.extend(arr.iter().cloned());
+        }
+        match v["@odata.nextLink"].as_str() {
+            Some(next) => url = next.to_string(),
+            None => break,
+        }
+    }
+    Ok(out)
+}
+
+/// Create an event in the account's default calendar.
+pub fn create_event(email: &str, event: &Value) -> Result<(), String> {
+    let access = valid_access(email)?;
+    let client = reqwest::blocking::Client::new();
+    let resp = client
+        .post(format!("{GRAPH}/me/events"))
+        .bearer_auth(&access)
+        .json(event)
+        .send()
+        .map_err(|e| format!("event create: {e}"))?;
+    if resp.status().is_success() {
+        Ok(())
+    } else {
+        Err(format!("event create -> HTTP {}", resp.status().as_u16()))
+    }
+}
