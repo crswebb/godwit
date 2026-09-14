@@ -18,7 +18,6 @@
     | { type: "folderStart"; name: string; index: number; folders: number; sourceTotal: number }
     | { type: "tick"; folder: string; done: number; total: number }
     | { type: "folderDone"; report: FolderReport }
-    | { type: "phase"; label: string }
     | { type: "warning"; message: string };
 
   let source = $state<Account>(blankAccount());
@@ -142,7 +141,6 @@
         case "folderStart": current = { name: p.name, done: 0, total: p.sourceTotal }; phase = `Email: ${p.name}`; break;
         case "tick": if (current && current.name === p.folder) current = { ...current, done: p.done, total: p.total }; break;
         case "folderDone": current = null; break;
-        case "phase": phase = p.label; current = null; break;
         case "warning": warnings = [...warnings, p.message]; break;
       }
     });

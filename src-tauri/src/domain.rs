@@ -121,7 +121,6 @@ pub enum Progress {
     FolderStart { name: String, index: usize, folders: usize, source_total: u32 },
     Tick { folder: String, done: u32, total: u32 },
     FolderDone { report: FolderReport },
-    Phase { label: String },
     Warning { message: String },
 }
 
