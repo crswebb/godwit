@@ -62,9 +62,8 @@ flagged, answered, draft), and internal dates, skipping any message already pres
 Start with **Dry run** checked to preview counts without writing. Everything runs locally; the source
 is only ever read (BODY.PEEK), and nothing is ever deleted.
 
-> **Icons** in `src-tauri/icons/` are solid-colour placeholders. Before the first `tauri build`,
-> regenerate the full platform set (incl. `.icns`/`.ico`) from a real logo:
-> `npm run tauri icon ./path-to-logo.png`.
+> **Icons** in `src-tauri/icons/` are the Godwit bird mark. To change them, run
+> `npm run tauri -- icon ./path-to-logo.png` (a square PNG, ideally 1024×1024).
 
 ## Project layout
 
