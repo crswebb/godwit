@@ -79,11 +79,16 @@ godwit/
 
 ## Status
 
-**Pre-MVP — Phase 1 in progress (2026-09-13).**
-Working: full IMAP→IMAP email copy — folders, messages, flags, internal dates, Message-ID dedup,
-live progress, and a dry-run mode.
-Next: checkpoint/resume across interruptions and a post-run verification pass (Phase 1 steps 5–6),
-then calendar + contacts (Phase 2). Also: fill in `docs/providers/` for the first host pair.
+**Pre-MVP — core migration working (2026-09-14).**
+Email, calendars, and contacts migrate between **IMAP/CalDAV/CardDAV hosts and Microsoft 365**, in any
+combination, from one unified flow: enter two accounts, connect, pick what to bring across.
+- **Email** rides as raw MIME (IMAP `BODY.PEEK` / Graph MIME), preserving flags + dates, deduped and
+  verified by Message-ID; cross-host folder mapping (delimiter + special-use).
+- **Calendars / contacts** ride as iCalendar / vCard; Microsoft 365 is converted to/from Graph JSON.
+
+Verified by unit tests + compiler; the Microsoft Graph paths are not yet exercised against a live
+tenant. Runtime-untested against real servers beyond IMAP↔IMAP.
+Next: keychain token persistence, a Google connector, and packaging/signing for distribution.
 
 ## Docs
 
