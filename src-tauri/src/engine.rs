@@ -4,7 +4,7 @@
 //! progress, and verification for every data kind — connectors never appear
 //! here, and the engine never asks "is this Microsoft 365?".
 
-use crate::domain::{emit, FolderReport, Progress};
+use crate::domain::{FolderReport, Progress};
 use chrono::{DateTime, FixedOffset};
 use std::collections::{HashMap, HashSet};
 
@@ -17,12 +17,14 @@ pub enum MailFlag {
     Draft,
 }
 
+#[derive(Clone)]
 pub enum Payload {
     Mime(Vec<u8>),
     Text(String),
 }
 
 /// A single item in canonical form, with the dedup key and (mail-only) metadata.
+#[derive(Clone)]
 pub struct Item {
     pub key: String,
     pub payload: Payload,
@@ -70,10 +72,10 @@ pub trait Writer {
 }
 
 /// Copy one source collection to one destination collection: dedup by key,
-/// stream items, verify by re-reading the destination. Emits progress.
+/// stream items, verify by re-reading the destination. Progress is reported
+/// through the `on` callback (keeps the engine free of any UI/Tauri coupling).
 #[allow(clippy::too_many_arguments)]
 pub fn copy_collection(
-    app: &tauri::AppHandle,
     reader: &mut dyn Reader,
     writer: &mut dyn Writer,
     src: &str,
@@ -81,12 +83,13 @@ pub fn copy_collection(
     index: usize,
     total_collections: usize,
     dry_run: bool,
+    on: &mut dyn FnMut(Progress),
 ) -> Result<FolderReport, String> {
     writer.ensure(dst)?;
     let dest_before = writer.existing_keys(dst)?;
     let refs = reader.list(src)?;
     let total = refs.len() as u32;
-    emit(app, Progress::FolderStart {
+    on(Progress::FolderStart {
         name: src.to_string(),
         index,
         folders: total_collections,
@@ -120,16 +123,16 @@ pub fn copy_collection(
                 Ok(()) => fr.copied += 1,
                 Err(e) => {
                     fr.failed += 1;
-                    emit(app, Progress::Warning { message: format!("{src}: {e}") });
+                    on(Progress::Warning { message: format!("{src}: {e}") });
                 }
             },
             Err(e) => {
                 fr.failed += 1;
-                emit(app, Progress::Warning { message: format!("{src}: {e}") });
+                on(Progress::Warning { message: format!("{src}: {e}") });
             }
         }
         if done % 25 == 0 || done == target {
-            emit(app, Progress::Tick { folder: src.to_string(), done, total: target });
+            on(Progress::Tick { folder: src.to_string(), done, total: target });
         }
     }
 
@@ -262,5 +265,159 @@ mod tests {
     fn m365_destination_passes_names_through() {
         let pairs = plan_targets(&["INBOX.Sent".to_string()], Some("."), &[], None, false);
         assert_eq!(pairs[0], ("INBOX.Sent".to_string(), "INBOX.Sent".to_string()));
+    }
+
+    // A faithful in-memory mailbox that actually stores and reflects writes, so
+    // copy_collection's real behaviour (dedup, verify, counts) is exercised —
+    // not a canned mock. `drop_keys` models a lossy sink (write returns Ok but
+    // nothing lands); `fail_keys` models an outright rejection.
+    struct MemStore {
+        data: HashMap<String, Vec<Item>>,
+        drop_keys: HashSet<String>,
+        fail_keys: HashSet<String>,
+    }
+
+    impl MemStore {
+        fn empty() -> Self {
+            Self { data: HashMap::new(), drop_keys: HashSet::new(), fail_keys: HashSet::new() }
+        }
+        fn seeded(collection: &str, items: Vec<Item>) -> Self {
+            let mut s = Self::empty();
+            s.data.insert(collection.to_string(), items);
+            s
+        }
+        fn count(&self, collection: &str) -> usize {
+            self.data.get(collection).map(Vec::len).unwrap_or(0)
+        }
+    }
+
+    impl Reader for MemStore {
+        fn list(&mut self, collection: &str) -> Result<Vec<ItemRef>, String> {
+            Ok(self
+                .data
+                .get(collection)
+                .map(|v| v.iter().enumerate().map(|(i, it)| ItemRef { id: i.to_string(), key: it.key.clone() }).collect())
+                .unwrap_or_default())
+        }
+        fn fetch(&mut self, collection: &str, r: &ItemRef) -> Result<Item, String> {
+            let i: usize = r.id.parse().map_err(|_| "bad id".to_string())?;
+            self.data.get(collection).and_then(|v| v.get(i)).cloned().ok_or_else(|| "gone".into())
+        }
+    }
+
+    impl Writer for MemStore {
+        fn ensure(&mut self, collection: &str) -> Result<(), String> {
+            self.data.entry(collection.to_string()).or_default();
+            Ok(())
+        }
+        fn existing_keys(&mut self, collection: &str) -> Result<HashSet<String>, String> {
+            Ok(self
+                .data
+                .get(collection)
+                .map(|v| v.iter().map(|it| it.key.clone()).filter(|k| !k.is_empty()).collect())
+                .unwrap_or_default())
+        }
+        fn write(&mut self, collection: &str, item: &Item) -> Result<(), String> {
+            if self.fail_keys.contains(&item.key) {
+                return Err("rejected".into());
+            }
+            if self.drop_keys.contains(&item.key) {
+                return Ok(()); // silently lost
+            }
+            self.data.entry(collection.to_string()).or_default().push(item.clone());
+            Ok(())
+        }
+    }
+
+    fn item(key: &str, body: &str) -> Item {
+        Item::text(key.to_string(), body.to_string())
+    }
+
+    fn silent() -> impl FnMut(Progress) {
+        |_p| {}
+    }
+
+    #[test]
+    fn copies_all_items_to_empty_destination() {
+        let mut src = MemStore::seeded("c", vec![item("a", "1"), item("b", "2"), item("c3", "3")]);
+        let mut dst = MemStore::empty();
+        let fr = copy_collection(&mut src, &mut dst, "c", "c", 0, 1, false, &mut silent()).unwrap();
+        assert_eq!((fr.source_total, fr.copied, fr.skipped, fr.failed, fr.missing), (3, 3, 0, 0, 0));
+        assert_eq!(dst.count("c"), 3);
+    }
+
+    #[test]
+    fn dedup_copies_only_the_delta() {
+        let mut src = MemStore::seeded("c", vec![item("a", "1"), item("b", "2"), item("c3", "3")]);
+        let mut dst = MemStore::seeded("c", vec![item("a", "1")]); // "a" already present
+        let fr = copy_collection(&mut src, &mut dst, "c", "c", 0, 1, false, &mut silent()).unwrap();
+        assert_eq!((fr.copied, fr.skipped, fr.missing), (2, 1, 0));
+        assert_eq!(dst.count("c"), 3);
+
+        // Re-running copies nothing (fully deduped).
+        let again = copy_collection(&mut src, &mut dst, "c", "c", 0, 1, false, &mut silent()).unwrap();
+        assert_eq!((again.copied, again.skipped), (0, 3));
+        assert_eq!(dst.count("c"), 3);
+    }
+
+    #[test]
+    fn dry_run_writes_nothing_but_counts_would_copy() {
+        let mut src = MemStore::seeded("c", vec![item("a", "1"), item("b", "2")]);
+        let mut dst = MemStore::empty();
+        let fr = copy_collection(&mut src, &mut dst, "c", "c", 0, 1, true, &mut silent()).unwrap();
+        assert_eq!((fr.copied, fr.skipped), (2, 0));
+        assert_eq!(dst.count("c"), 0); // nothing actually written
+    }
+
+    #[test]
+    fn verify_detects_silently_lost_item() {
+        let mut src = MemStore::seeded("c", vec![item("a", "1"), item("b", "2"), item("c3", "3")]);
+        let mut dst = MemStore::empty();
+        dst.drop_keys.insert("b".into()); // write reports Ok but "b" never lands
+        let fr = copy_collection(&mut src, &mut dst, "c", "c", 0, 1, false, &mut silent()).unwrap();
+        assert_eq!(fr.copied, 3); // write() said Ok for all three
+        assert_eq!(fr.failed, 0);
+        assert_eq!(fr.missing, 1); // ...but verification caught the loss
+        assert_eq!(dst.count("c"), 2);
+    }
+
+    #[test]
+    fn rejected_write_counts_failed_and_missing() {
+        let mut src = MemStore::seeded("c", vec![item("a", "1"), item("b", "2")]);
+        let mut dst = MemStore::empty();
+        dst.fail_keys.insert("b".into());
+        let fr = copy_collection(&mut src, &mut dst, "c", "c", 0, 1, false, &mut silent()).unwrap();
+        assert_eq!((fr.copied, fr.failed, fr.missing), (1, 1, 1));
+        assert_eq!(dst.count("c"), 1);
+    }
+
+    #[test]
+    fn items_without_a_key_are_always_copied() {
+        let mut src = MemStore::seeded("c", vec![item("", "no-message-id")]);
+        let mut dst = MemStore::empty();
+        let first = copy_collection(&mut src, &mut dst, "c", "c", 0, 1, false, &mut silent()).unwrap();
+        assert_eq!(first.copied, 1);
+        assert_eq!(first.missing, 0); // empty keys aren't counted as missing
+        // No dedup key, so a second run copies it again (documented behaviour).
+        let second = copy_collection(&mut src, &mut dst, "c", "c", 0, 1, false, &mut silent()).unwrap();
+        assert_eq!(second.copied, 1);
+        assert_eq!(dst.count("c"), 2);
+    }
+
+    #[test]
+    fn progress_reflects_the_actual_work() {
+        let mut src = MemStore::seeded("c", vec![item("a", "1"), item("b", "2")]);
+        let mut dst = MemStore::empty();
+        dst.fail_keys.insert("b".into());
+        let mut events: Vec<Progress> = Vec::new();
+        copy_collection(&mut src, &mut dst, "c", "c", 0, 1, false, &mut |p| events.push(p)).unwrap();
+
+        let started = events.iter().find_map(|e| match e {
+            Progress::FolderStart { source_total, .. } => Some(*source_total),
+            _ => None,
+        });
+        assert_eq!(started, Some(2));
+        let warnings = events.iter().filter(|e| matches!(e, Progress::Warning { .. })).count();
+        assert_eq!(warnings, 1); // one per failed item
     }
 }

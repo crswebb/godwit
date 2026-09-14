@@ -181,3 +181,28 @@ fn parse_imap(xml: &str) -> Option<ImapServer> {
         Some(ImapServer { host, port })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn picks_imap_server_over_pop() {
+        // Mozilla autoconfig / ISPDB shape, POP listed before IMAP.
+        let xml = r#"<clientConfig version="1.1"><emailProvider id="example.com">
+          <incomingServer type="pop3"><hostname>pop.example.com</hostname><port>995</port></incomingServer>
+          <incomingServer type="imap"><hostname>imap.example.com</hostname><port>993</port><socketType>SSL</socketType></incomingServer>
+        </emailProvider></clientConfig>"#;
+        let s = parse_imap(xml).expect("imap server");
+        assert_eq!(s.host, "imap.example.com");
+        assert_eq!(s.port, 993);
+    }
+
+    #[test]
+    fn returns_none_when_no_imap_offered() {
+        let xml = r#"<clientConfig><emailProvider>
+          <incomingServer type="pop3"><hostname>pop.example.com</hostname><port>995</port></incomingServer>
+        </emailProvider></clientConfig>"#;
+        assert!(parse_imap(xml).is_none());
+    }
+}

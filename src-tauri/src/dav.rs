@@ -394,3 +394,68 @@ fn parse_responses(xml: &str) -> Vec<ResponseEntry> {
     }
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn finds_current_user_principal_href() {
+        let xml = r#"<?xml version="1.0"?>
+        <d:multistatus xmlns:d="DAV:">
+          <d:response>
+            <d:href>/principals/</d:href>
+            <d:propstat><d:prop><d:current-user-principal>
+              <d:href>/principals/users/alice/</d:href>
+            </d:current-user-principal></d:prop>
+            <d:status>HTTP/1.1 200 OK</d:status></d:propstat>
+          </d:response>
+        </d:multistatus>"#;
+        assert_eq!(
+            first_href_in(xml, "current-user-principal").as_deref(),
+            Some("/principals/users/alice/")
+        );
+        // The response-level <href> must not be mistaken for the principal.
+        assert_eq!(first_href_in(xml, "calendar-home-set"), None);
+    }
+
+    #[test]
+    fn parses_collection_listing_prefix_agnostic() {
+        // Different namespace prefixes (D:, C:) than we emit — must still parse.
+        let xml = r#"<?xml version="1.0"?>
+        <D:multistatus xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">
+          <D:response><D:href>/cal/home/</D:href><D:propstat><D:prop>
+            <D:resourcetype><D:collection/></D:resourcetype><D:displayname>Home</D:displayname>
+          </D:prop></D:propstat></D:response>
+          <D:response><D:href>/cal/home/work/</D:href><D:propstat><D:prop>
+            <D:resourcetype><D:collection/><C:calendar/></D:resourcetype><D:displayname>Work</D:displayname>
+          </D:prop></D:propstat></D:response>
+        </D:multistatus>"#;
+        let rs = parse_responses(xml);
+        assert_eq!(rs.len(), 2);
+        let cal = rs.iter().find(|r| r.resourcetypes.iter().any(|t| t == "calendar")).expect("a calendar");
+        assert_eq!(cal.href, "/cal/home/work/");
+        assert_eq!(cal.displayname, "Work");
+        assert!(!rs[0].resourcetypes.iter().any(|t| t == "calendar"));
+    }
+
+    #[test]
+    fn detects_item_resources_by_content_type_or_extension() {
+        let xml = r#"<?xml version="1.0"?>
+        <d:multistatus xmlns:d="DAV:">
+          <d:response><d:href>/cal/home/</d:href><d:propstat><d:prop>
+            <d:getcontenttype/></d:prop><d:status>HTTP/1.1 404 Not Found</d:status></d:propstat></d:response>
+          <d:response><d:href>/cal/home/1.ics</d:href><d:propstat><d:prop>
+            <d:getcontenttype>text/calendar; charset=utf-8</d:getcontenttype></d:prop></d:propstat></d:response>
+        </d:multistatus>"#;
+        let rs = parse_responses(xml);
+        let is_item = |r: &ResponseEntry| {
+            r.contenttype.contains("calendar")
+                || r.contenttype.contains("vcard")
+                || r.href.ends_with(".ics")
+                || r.href.ends_with(".vcf")
+        };
+        let items: Vec<&str> = rs.iter().filter(|r| is_item(r)).map(|r| r.href.as_str()).collect();
+        assert_eq!(items, vec!["/cal/home/1.ics"]);
+    }
+}

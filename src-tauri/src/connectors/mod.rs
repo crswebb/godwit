@@ -107,7 +107,8 @@ fn copy_one(
     dry_run: bool,
     label: &str,
 ) -> FolderReport {
-    let fr = match engine::copy_collection(app, reader, writer, src, dst, index, total, dry_run) {
+    let mut on = |p: Progress| emit(app, p);
+    let fr = match engine::copy_collection(reader, writer, src, dst, index, total, dry_run, &mut on) {
         Ok(fr) => fr,
         Err(e) => {
             emit(app, Progress::Warning { message: format!("{label}: {e}") });
