@@ -1,6 +1,6 @@
 # ADR-0001: Refactor to the connector architecture
 
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-09-14
 **Deciders:** Stefan
 
