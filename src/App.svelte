@@ -41,10 +41,14 @@
   let phase = $state<string | null>(null);
   let warnings = $state<string[]>([]);
 
-  const canConnect = $derived(
-    source.email.trim() !== "" && source.password !== "" &&
-      destination.email.trim() !== "" && destination.password !== "" && !probing && !running,
-  );
+  // A Microsoft account is ready once signed in (it has an email, no password);
+  // a password account needs both email and password.
+  function accountReady(a: Account): boolean {
+    if (a.provider === "microsoft") return a.email.trim() !== "";
+    return a.email.trim() !== "" && a.password !== "";
+  }
+
+  const canConnect = $derived(accountReady(source) && accountReady(destination) && !probing && !running);
 
   // Same address on both sides = a domain move between providers. Autodiscovery
   // keys off the domain, so it can't tell the two servers apart — the user must
