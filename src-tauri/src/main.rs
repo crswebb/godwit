@@ -8,6 +8,7 @@ mod microsoft;
 
 use mail::{MailReader, MailWriter};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use tauri::Emitter;
 
 fn default_provider() -> String {
@@ -196,40 +197,43 @@ fn migrate_mail(
     app: &tauri::AppHandle,
     reader: &mut dyn MailReader,
     writer: &mut dyn MailWriter,
-    folders: &[String],
+    pairs: &[(String, String)],
     dry_run: bool,
 ) -> Vec<FolderReport> {
-    emit(app, Progress::Started { folders: folders.len() });
+    emit(app, Progress::Started { folders: pairs.len() });
     let mut reports = Vec::new();
-    for (i, name) in folders.iter().enumerate() {
-        match copy_folder(app, reader, writer, name, i, folders.len(), dry_run) {
+    for (i, (src, dst)) in pairs.iter().enumerate() {
+        match copy_folder(app, reader, writer, src, dst, i, pairs.len(), dry_run) {
             Ok(fr) => {
                 emit(app, Progress::FolderDone { report: fr.clone() });
                 reports.push(fr);
             }
             Err(e) => {
-                emit(app, Progress::Warning { message: format!("{name}: {e}") });
-                reports.push(FolderReport { folder: name.clone(), ..Default::default() });
+                emit(app, Progress::Warning { message: format!("{src}: {e}") });
+                let folder = if src == dst { src.clone() } else { format!("{src} → {dst}") };
+                reports.push(FolderReport { folder, ..Default::default() });
             }
         }
     }
     reports
 }
 
+#[allow(clippy::too_many_arguments)]
 fn copy_folder(
     app: &tauri::AppHandle,
     reader: &mut dyn MailReader,
     writer: &mut dyn MailWriter,
-    name: &str,
+    src_folder: &str,
+    dst_folder: &str,
     index: usize,
     folders: usize,
     dry_run: bool,
 ) -> Result<FolderReport, String> {
-    writer.ensure_folder(name)?;
-    let dest_before = writer.existing_message_ids(name)?;
-    let src = reader.list(name)?;
+    writer.ensure_folder(dst_folder)?;
+    let dest_before = writer.existing_message_ids(dst_folder)?;
+    let src = reader.list(src_folder)?;
     let total = src.len() as u32;
-    emit(app, Progress::FolderStart { name: name.to_string(), index, folders, source_total: total });
+    emit(app, Progress::FolderStart { name: src_folder.to_string(), index, folders, source_total: total });
 
     let to_copy: Vec<_> = src
         .iter()
@@ -239,8 +243,13 @@ fn copy_folder(
         })
         .collect();
 
+    let display = if src_folder == dst_folder {
+        src_folder.to_string()
+    } else {
+        format!("{src_folder} → {dst_folder}")
+    };
     let mut fr = FolderReport {
-        folder: name.to_string(),
+        folder: display,
         source_total: total,
         skipped: (src.len() - to_copy.len()) as u32,
         ..Default::default()
@@ -255,25 +264,25 @@ fn copy_folder(
     let mut done = 0u32;
     for m in to_copy {
         done += 1;
-        match reader.fetch_mime(name, m) {
-            Ok(mime) => match writer.append(name, &mime, m) {
+        match reader.fetch_mime(src_folder, m) {
+            Ok(mime) => match writer.append(dst_folder, &mime, m) {
                 Ok(()) => fr.copied += 1,
                 Err(e) => {
                     fr.failed += 1;
-                    emit(app, Progress::Warning { message: format!("{name}: {e}") });
+                    emit(app, Progress::Warning { message: format!("{src_folder}: {e}") });
                 }
             },
             Err(e) => {
                 fr.failed += 1;
-                emit(app, Progress::Warning { message: format!("{name}: {e}") });
+                emit(app, Progress::Warning { message: format!("{src_folder}: {e}") });
             }
         }
         if done % 25 == 0 || done == target {
-            emit(app, Progress::Tick { folder: name.to_string(), done, total: target });
+            emit(app, Progress::Tick { folder: src_folder.to_string(), done, total: target });
         }
     }
 
-    let dest_after = writer.existing_message_ids(name)?;
+    let dest_after = writer.existing_message_ids(dst_folder)?;
     fr.missing = src
         .iter()
         .filter_map(|m| m.message_id.as_ref())
@@ -281,6 +290,88 @@ fn copy_folder(
         .count() as u32;
 
     Ok(fr)
+}
+
+// --- Folder mapping between hosts -----------------------------------------
+
+fn is_inbox(name: &str) -> bool {
+    name.eq_ignore_ascii_case("INBOX")
+}
+
+fn leaf_of(name: &str, delim: Option<&str>) -> String {
+    match delim {
+        Some(d) if !d.is_empty() => name.rsplit(d).next().unwrap_or(name).to_string(),
+        _ => name.to_string(),
+    }
+}
+
+/// Re-express a folder path using the destination's hierarchy delimiter.
+fn translate_path(name: &str, src: Option<&str>, dst: Option<&str>) -> String {
+    match (src, dst) {
+        (Some(s), Some(d)) if s != d && !s.is_empty() && !d.is_empty() => name.replace(s, d),
+        _ => name.to_string(),
+    }
+}
+
+/// Normalise a folder leaf name to a special-use category, if any.
+fn canonical_special(leaf: &str) -> Option<&'static str> {
+    match leaf.trim().to_lowercase().as_str() {
+        "sent" | "sent messages" | "sent items" | "sent mail" => Some("sent"),
+        "drafts" | "draft" => Some("drafts"),
+        "trash" | "deleted" | "deleted messages" | "deleted items" | "bin" => Some("trash"),
+        "junk" | "spam" | "junk email" | "junk e-mail" => Some("junk"),
+        "archive" | "archives" => Some("archive"),
+        _ => None,
+    }
+}
+
+/// Map each selected source folder to the right destination folder name:
+/// translate the hierarchy delimiter between hosts and route special-use
+/// folders (Sent/Drafts/Trash/Junk/Archive) to the destination's existing one.
+/// A Microsoft 365 destination resolves folders itself (Graph), so names pass
+/// through unchanged.
+fn plan_targets(
+    source: &Account,
+    destination: &Account,
+    folders: &[String],
+) -> Result<Vec<(String, String)>, String> {
+    if destination.is_microsoft() {
+        return Ok(folders.iter().map(|f| (f.clone(), f.clone())).collect());
+    }
+
+    let dst_list = list_folders_sync(&imap_creds(destination)?)?;
+    let dst_delim = dst_list.iter().find_map(|f| f.delimiter.clone());
+    let src_delim = if source.is_microsoft() {
+        None
+    } else {
+        list_folders_sync(&imap_creds(source)?)?.iter().find_map(|f| f.delimiter.clone())
+    };
+
+    // Index the destination's special-use folders by category.
+    let mut dst_special: HashMap<&'static str, String> = HashMap::new();
+    for f in &dst_list {
+        let leaf = leaf_of(&f.name, dst_delim.as_deref());
+        if let Some(c) = canonical_special(&leaf) {
+            dst_special.entry(c).or_insert_with(|| f.name.clone());
+        }
+    }
+
+    let pairs = folders
+        .iter()
+        .map(|f| {
+            if is_inbox(f) {
+                return (f.clone(), "INBOX".to_string());
+            }
+            let leaf = leaf_of(f, src_delim.as_deref());
+            if let Some(c) = canonical_special(&leaf) {
+                if let Some(dest_name) = dst_special.get(c) {
+                    return (f.clone(), dest_name.clone());
+                }
+            }
+            (f.clone(), translate_path(f, src_delim.as_deref(), dst_delim.as_deref()))
+        })
+        .collect();
+    Ok(pairs)
 }
 
 // --- Commands --------------------------------------------------------------
@@ -384,9 +475,10 @@ fn run_blocking(
     let mut report = UnifiedReport::default();
 
     if !selection.folders.is_empty() {
+        let pairs = plan_targets(&source, &destination, &selection.folders)?;
         let mut reader = make_reader(&source)?;
         let mut writer = make_writer(&destination)?;
-        report.folders = migrate_mail(app, reader.as_mut(), writer.as_mut(), &selection.folders, dry_run);
+        report.folders = migrate_mail(app, reader.as_mut(), writer.as_mut(), &pairs, dry_run);
     }
 
     // Calendar/contacts run over CalDAV/CardDAV. M365 (Graph JSON) conversion
@@ -433,4 +525,39 @@ fn main() {
         .invoke_handler(tauri::generate_handler![probe, run_migration, ms_sign_in])
         .run(tauri::generate_context!())
         .expect("error while running Godwit");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn translates_hierarchy_delimiter() {
+        assert_eq!(translate_path("INBOX.Archive.2023", Some("."), Some("/")), "INBOX/Archive/2023");
+        assert_eq!(translate_path("A/B", Some("/"), Some("/")), "A/B"); // same delim: unchanged
+        assert_eq!(translate_path("Sent", Some("."), None), "Sent"); // unknown dest delim: unchanged
+    }
+
+    #[test]
+    fn recognises_special_use_synonyms() {
+        assert_eq!(canonical_special("Sent Items"), Some("sent"));
+        assert_eq!(canonical_special("sent messages"), Some("sent"));
+        assert_eq!(canonical_special("JUNK"), Some("junk"));
+        assert_eq!(canonical_special("Deleted Items"), Some("trash"));
+        assert_eq!(canonical_special("Projects"), None);
+    }
+
+    #[test]
+    fn takes_leaf_by_delimiter() {
+        assert_eq!(leaf_of("INBOX.Sent", Some(".")), "Sent");
+        assert_eq!(leaf_of("INBOX/Archive/Old", Some("/")), "Old");
+        assert_eq!(leaf_of("Sent Items", None), "Sent Items");
+    }
+
+    #[test]
+    fn inbox_is_case_insensitive() {
+        assert!(is_inbox("INBOX"));
+        assert!(is_inbox("inbox"));
+        assert!(!is_inbox("INBOX.Sent"));
+    }
 }
