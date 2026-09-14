@@ -1,28 +1,11 @@
 <script lang="ts" module>
-  export type Account = {
-    email: string;
-    password: string;
-    imapHost: string | null;
-    imapPort: number | null;
-    davUrl: string | null;
-    provider: "password" | "microsoft";
-  };
-
-  export const blankAccount = (): Account => ({
-    email: "",
-    password: "",
-    imapHost: null,
-    imapPort: null,
-    davUrl: null,
-    provider: "password",
-  });
-
   // The Godwit app registered in the CRS Webbproduktion tenant (public id, not a secret).
   const MS_CLIENT_ID = "5746290e-9198-489b-b325-be452af41cc5";
 </script>
 
 <script lang="ts">
-  import { invoke } from "@tauri-apps/api/core";
+  import type { Account } from "./types";
+  import { errorText, msSignIn } from "./api";
 
   let {
     label,
@@ -37,11 +20,11 @@
     signingIn = true;
     signInError = null;
     try {
-      const result = await invoke<{ email: string }>("ms_sign_in", { clientId: MS_CLIENT_ID });
+      const result = await msSignIn(MS_CLIENT_ID);
       account.email = result.email;
       account.provider = "microsoft";
     } catch (err) {
-      signInError = typeof err === "string" ? err : String(err);
+      signInError = errorText(err);
     } finally {
       signingIn = false;
     }
