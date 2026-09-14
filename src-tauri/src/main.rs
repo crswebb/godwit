@@ -3,37 +3,36 @@
 
 mod autoconfig;
 mod dav;
+mod mail;
 mod microsoft;
 
-use std::collections::HashSet;
-use std::net::TcpStream;
-
-use imap::types::{Fetch, Flag};
-use native_tls::TlsStream;
+use mail::{MailReader, MailWriter};
 use serde::{Deserialize, Serialize};
 use tauri::Emitter;
 
-type ImapSession = imap::Session<TlsStream<TcpStream>>;
+fn default_provider() -> String {
+    "password".to_string()
+}
 
-/// One account (source or destination). Email + password is usually enough;
-/// the server details are discovered, and only surface in the UI if discovery
-/// fails.
+/// One account (source or destination). `provider` is "password" (IMAP/DAV) or
+/// "microsoft" (Graph via OAuth; `email` identifies the signed-in session).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Account {
     pub email: String,
+    #[serde(default)]
     pub password: String,
     pub imap_host: Option<String>,
     pub imap_port: Option<u16>,
     pub dav_url: Option<String>,
+    #[serde(default = "default_provider")]
+    pub provider: String,
 }
 
-#[derive(Debug, Clone)]
-struct ImapCreds {
-    host: String,
-    port: u16,
-    username: String,
-    password: String,
+impl Account {
+    fn is_microsoft(&self) -> bool {
+        self.provider == "microsoft"
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -55,13 +54,12 @@ pub struct FolderReport {
     pub missing: u32,
 }
 
-// --- Probe (what can be migrated) -----------------------------------------
+// --- Probe ----------------------------------------------------------------
 
 #[derive(Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ImapProbe {
-    /// "ok" | "needsHost" | "error"
-    pub status: String,
+    pub status: String, // "ok" | "needsHost" | "error"
     pub host: Option<String>,
     pub port: Option<u16>,
     pub folders: Vec<FolderInfo>,
@@ -71,8 +69,7 @@ pub struct ImapProbe {
 #[derive(Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DavProbe {
-    /// "ok" | "unavailable"
-    pub status: String,
+    pub status: String, // "ok" | "unavailable"
     pub collections: Vec<dav::DavCollection>,
     pub error: Option<String>,
 }
@@ -133,28 +130,49 @@ enum Progress {
 }
 
 const PROGRESS_EVENT: &str = "migration://progress";
-const FETCH_BATCH: usize = 20;
-const ENVELOPE_BATCH: usize = 500;
 
 fn emit(app: &tauri::AppHandle, p: Progress) {
     let _ = app.emit(PROGRESS_EVENT, p);
 }
 
-// --- IMAP ------------------------------------------------------------------
+// --- Account -> protocol creds --------------------------------------------
 
-fn open_session(creds: &ImapCreds) -> Result<ImapSession, String> {
-    let tls = native_tls::TlsConnector::builder()
-        .build()
-        .map_err(|e| format!("TLS setup failed: {e}"))?;
-    let client = imap::connect((creds.host.as_str(), creds.port), creds.host.as_str(), &tls)
-        .map_err(|e| format!("Connection failed: {e}"))?;
-    client
-        .login(&creds.username, &creds.password)
-        .map_err(|(e, _client)| format!("Login failed: {e}"))
+fn imap_creds(a: &Account) -> Result<mail::ImapCreds, String> {
+    let host = a
+        .imap_host
+        .clone()
+        .filter(|h| !h.is_empty())
+        .ok_or("IMAP server is unknown for this account (set it under Advanced).")?;
+    Ok(mail::ImapCreds {
+        host,
+        port: a.imap_port.unwrap_or(993),
+        username: a.email.clone(),
+        password: a.password.clone(),
+    })
 }
 
-fn list_folders_sync(creds: &ImapCreds) -> Result<Vec<FolderInfo>, String> {
-    let mut session = open_session(creds)?;
+fn dav_account(a: &Account) -> dav::DavAccount {
+    dav::DavAccount { url: a.dav_url.clone(), username: a.email.clone(), password: a.password.clone() }
+}
+
+fn make_reader(a: &Account) -> Result<Box<dyn MailReader>, String> {
+    if a.is_microsoft() {
+        Ok(Box::new(mail::GraphMail::new(a.email.clone())))
+    } else {
+        Ok(Box::new(mail::ImapReader::new(mail::open_session(&imap_creds(a)?)?)))
+    }
+}
+
+fn make_writer(a: &Account) -> Result<Box<dyn MailWriter>, String> {
+    if a.is_microsoft() {
+        Ok(Box::new(mail::GraphMail::new(a.email.clone())))
+    } else {
+        Ok(Box::new(mail::ImapWriter::new(mail::open_session(&imap_creds(a)?)?)))
+    }
+}
+
+fn list_folders_sync(creds: &mail::ImapCreds) -> Result<Vec<FolderInfo>, String> {
+    let mut session = mail::open_session(creds)?;
     let result = session
         .list(Some(""), Some("*"))
         .map_err(|e| format!("LIST failed: {e}"))
@@ -172,21 +190,19 @@ fn list_folders_sync(creds: &ImapCreds) -> Result<Vec<FolderInfo>, String> {
     result
 }
 
-fn migrate_email(
+// --- Mail copy (protocol-agnostic) ----------------------------------------
+
+fn migrate_mail(
     app: &tauri::AppHandle,
-    src: &ImapCreds,
-    dst: &ImapCreds,
+    reader: &mut dyn MailReader,
+    writer: &mut dyn MailWriter,
     folders: &[String],
     dry_run: bool,
-) -> Result<Vec<FolderReport>, String> {
-    let mut src_s = open_session(src)?;
-    let mut dst_s = open_session(dst)?;
-
+) -> Vec<FolderReport> {
     emit(app, Progress::Started { folders: folders.len() });
-
     let mut reports = Vec::new();
     for (i, name) in folders.iter().enumerate() {
-        match copy_folder(app, &mut src_s, &mut dst_s, name, i, folders.len(), dry_run) {
+        match copy_folder(app, reader, writer, name, i, folders.len(), dry_run) {
             Ok(fr) => {
                 emit(app, Progress::FolderDone { report: fr.clone() });
                 reports.push(fr);
@@ -197,55 +213,36 @@ fn migrate_email(
             }
         }
     }
-
-    let _ = src_s.logout();
-    let _ = dst_s.logout();
-    Ok(reports)
+    reports
 }
 
 fn copy_folder(
     app: &tauri::AppHandle,
-    src: &mut ImapSession,
-    dst: &mut ImapSession,
+    reader: &mut dyn MailReader,
+    writer: &mut dyn MailWriter,
     name: &str,
     index: usize,
     folders: usize,
     dry_run: bool,
 ) -> Result<FolderReport, String> {
-    let _ = dst.create(name);
+    writer.ensure_folder(name)?;
+    let dest_before = writer.existing_message_ids(name)?;
+    let src = reader.list(name)?;
+    let total = src.len() as u32;
+    emit(app, Progress::FolderStart { name: name.to_string(), index, folders, source_total: total });
 
-    let dmb = dst.select(name).map_err(|e| format!("select destination: {e}"))?;
-    let dest_before = collect_ids_by_seq(dst, dmb.exists)?;
-
-    let smb = src.select(name).map_err(|e| format!("select source: {e}"))?;
-    let total = smb.exists;
-    emit(
-        app,
-        Progress::FolderStart { name: name.to_string(), index, folders, source_total: total },
-    );
-
-    let mut uids: Vec<u32> = src
-        .uid_search("ALL")
-        .map_err(|e| format!("UID SEARCH: {e}"))?
-        .into_iter()
-        .collect();
-    uids.sort_unstable();
-
-    let src_entries = collect_source_entries(src, &uids)?;
-
-    let to_copy: Vec<u32> = src_entries
+    let to_copy: Vec<_> = src
         .iter()
-        .filter(|(_, id)| match id {
+        .filter(|m| match &m.message_id {
             Some(id) => !dest_before.contains(id),
             None => true,
         })
-        .map(|(uid, _)| *uid)
         .collect();
 
     let mut fr = FolderReport {
         folder: name.to_string(),
         source_total: total,
-        skipped: src_entries.len().saturating_sub(to_copy.len()) as u32,
+        skipped: (src.len() - to_copy.len()) as u32,
         ..Default::default()
     };
 
@@ -256,134 +253,39 @@ fn copy_folder(
 
     let target = to_copy.len() as u32;
     let mut done = 0u32;
-    for chunk in to_copy.chunks(FETCH_BATCH) {
-        let set = chunk.iter().map(u32::to_string).collect::<Vec<_>>().join(",");
-        let messages = src
-            .uid_fetch(&set, "(FLAGS INTERNALDATE BODY.PEEK[])")
-            .map_err(|e| format!("UID FETCH: {e}"))?;
-
-        for m in messages.iter() {
-            done += 1;
-            match m.body() {
-                Some(body) => {
-                    let flags = map_flags(m.flags());
-                    match dst.append_with_flags_and_date(name, body, &flags, m.internal_date()) {
-                        Ok(()) => fr.copied += 1,
-                        Err(e) => {
-                            fr.failed += 1;
-                            emit(app, Progress::Warning { message: format!("{name}: append failed: {e}") });
-                        }
-                    }
+    for m in to_copy {
+        done += 1;
+        match reader.fetch_mime(name, m) {
+            Ok(mime) => match writer.append(name, &mime, m) {
+                Ok(()) => fr.copied += 1,
+                Err(e) => {
+                    fr.failed += 1;
+                    emit(app, Progress::Warning { message: format!("{name}: {e}") });
                 }
-                None => fr.failed += 1,
+            },
+            Err(e) => {
+                fr.failed += 1;
+                emit(app, Progress::Warning { message: format!("{name}: {e}") });
             }
-
-            if done % 25 == 0 || done == target {
-                emit(app, Progress::Tick { folder: name.to_string(), done, total: target });
-            }
+        }
+        if done % 25 == 0 || done == target {
+            emit(app, Progress::Tick { folder: name.to_string(), done, total: target });
         }
     }
 
-    let dmb2 = dst.select(name).map_err(|e| format!("re-select destination: {e}"))?;
-    let dest_after = collect_ids_by_seq(dst, dmb2.exists)?;
-    fr.missing = src_entries
+    let dest_after = writer.existing_message_ids(name)?;
+    fr.missing = src
         .iter()
-        .filter_map(|(_, id)| id.as_ref())
+        .filter_map(|m| m.message_id.as_ref())
         .filter(|id| !dest_after.contains(*id))
         .count() as u32;
 
     Ok(fr)
 }
 
-fn collect_ids_by_seq(session: &mut ImapSession, exists: u32) -> Result<HashSet<String>, String> {
-    let mut ids = HashSet::new();
-    if exists == 0 {
-        return Ok(ids);
-    }
-    let mut start = 1u32;
-    while start <= exists {
-        let end = (start + ENVELOPE_BATCH as u32 - 1).min(exists);
-        let seq = format!("{start}:{end}");
-        let items = session
-            .fetch(&seq, "(ENVELOPE)")
-            .map_err(|e| format!("ENVELOPE fetch: {e}"))?;
-        for f in items.iter() {
-            if let Some(id) = message_id(f) {
-                ids.insert(id);
-            }
-        }
-        start = end + 1;
-    }
-    Ok(ids)
-}
-
-fn collect_source_entries(
-    session: &mut ImapSession,
-    uids: &[u32],
-) -> Result<Vec<(u32, Option<String>)>, String> {
-    let mut out = Vec::with_capacity(uids.len());
-    for chunk in uids.chunks(ENVELOPE_BATCH) {
-        let set = chunk.iter().map(u32::to_string).collect::<Vec<_>>().join(",");
-        let items = session
-            .uid_fetch(&set, "(UID ENVELOPE)")
-            .map_err(|e| format!("UID ENVELOPE fetch: {e}"))?;
-        for f in items.iter() {
-            if let Some(uid) = f.uid {
-                out.push((uid, message_id(f)));
-            }
-        }
-    }
-    Ok(out)
-}
-
-fn message_id(f: &Fetch) -> Option<String> {
-    f.envelope()
-        .and_then(|e| e.message_id.as_deref())
-        .map(|b| String::from_utf8_lossy(b).trim().to_string())
-        .filter(|s| !s.is_empty())
-}
-
-fn map_flags(src: &[Flag]) -> Vec<Flag<'static>> {
-    let mut out = Vec::new();
-    for f in src {
-        match f {
-            Flag::Seen => out.push(Flag::Seen),
-            Flag::Answered => out.push(Flag::Answered),
-            Flag::Flagged => out.push(Flag::Flagged),
-            Flag::Draft => out.push(Flag::Draft),
-            _ => {}
-        }
-    }
-    out
-}
-
-// --- Helpers to derive per-protocol creds from an Account ------------------
-
-fn imap_creds(a: &Account) -> Result<ImapCreds, String> {
-    let host = a
-        .imap_host
-        .clone()
-        .ok_or("IMAP server is unknown for this account (set it under Advanced).")?;
-    Ok(ImapCreds {
-        host,
-        port: a.imap_port.unwrap_or(993),
-        username: a.email.clone(),
-        password: a.password.clone(),
-    })
-}
-
-fn dav_account(a: &Account) -> dav::DavAccount {
-    dav::DavAccount {
-        url: a.dav_url.clone(),
-        username: a.email.clone(),
-        password: a.password.clone(),
-    }
-}
-
 // --- Commands --------------------------------------------------------------
 
-/// Probe an account for everything Godwit can migrate: IMAP folders (with mail
-/// server autodiscovery), calendars, and address books.
+/// Probe an account for everything Godwit can migrate.
 #[tauri::command]
 async fn probe(account: Account) -> Result<Probe, String> {
     tokio::task::spawn_blocking(move || probe_blocking(&account))
@@ -392,10 +294,41 @@ async fn probe(account: Account) -> Result<Probe, String> {
 }
 
 fn probe_blocking(acc: &Account) -> Probe {
+    if acc.is_microsoft() {
+        return probe_microsoft(acc);
+    }
     Probe {
         imap: probe_imap(acc),
         calendars: probe_dav(acc, dav::DavKind::Calendar),
         contacts: probe_dav(acc, dav::DavKind::Contacts),
+    }
+}
+
+fn probe_microsoft(acc: &Account) -> Probe {
+    match microsoft::probe(&acc.email) {
+        Ok(mp) => {
+            let folders = mp
+                .folders
+                .into_iter()
+                .map(|f| FolderInfo { name: f.name, delimiter: None, attributes: vec![] })
+                .collect();
+            let as_collections = |names: Vec<String>| {
+                names
+                    .into_iter()
+                    .map(|n| dav::DavCollection { name: n.clone(), href: n, count: None })
+                    .collect::<Vec<_>>()
+            };
+            Probe {
+                imap: ImapProbe { status: "ok".into(), folders, ..Default::default() },
+                calendars: DavProbe { status: "ok".into(), collections: as_collections(mp.calendars), error: None },
+                contacts: DavProbe { status: "ok".into(), collections: as_collections(mp.contact_folders), error: None },
+            }
+        }
+        Err(e) => Probe {
+            imap: ImapProbe { status: "error".into(), error: Some(e.clone()), ..Default::default() },
+            calendars: DavProbe { status: "unavailable".into(), error: Some(e.clone()), ..Default::default() },
+            contacts: DavProbe { status: "unavailable".into(), error: Some(e), ..Default::default() },
+        },
     }
 }
 
@@ -408,27 +341,15 @@ fn probe_imap(acc: &Account) -> ImapProbe {
         return ImapProbe { status: "needsHost".into(), ..Default::default() };
     };
 
-    let creds = ImapCreds {
+    let creds = mail::ImapCreds {
         host: host.clone(),
         port,
         username: acc.email.clone(),
         password: acc.password.clone(),
     };
     match list_folders_sync(&creds) {
-        Ok(folders) => ImapProbe {
-            status: "ok".into(),
-            host: Some(host),
-            port: Some(port),
-            folders,
-            error: None,
-        },
-        Err(e) => ImapProbe {
-            status: "error".into(),
-            host: Some(host),
-            port: Some(port),
-            folders: vec![],
-            error: Some(e),
-        },
+        Ok(folders) => ImapProbe { status: "ok".into(), host: Some(host), port: Some(port), folders, error: None },
+        Err(e) => ImapProbe { status: "error".into(), host: Some(host), port: Some(port), folders: vec![], error: Some(e) },
     }
 }
 
@@ -463,33 +384,38 @@ fn run_blocking(
     let mut report = UnifiedReport::default();
 
     if !selection.folders.is_empty() {
-        let src = imap_creds(&source)?;
-        let dst = imap_creds(&destination)?;
-        report.folders = migrate_email(app, &src, &dst, &selection.folders, dry_run)?;
+        let mut reader = make_reader(&source)?;
+        let mut writer = make_writer(&destination)?;
+        report.folders = migrate_mail(app, reader.as_mut(), writer.as_mut(), &selection.folders, dry_run);
     }
 
+    // Calendar/contacts run over CalDAV/CardDAV. M365 (Graph JSON) conversion
+    // isn't built yet, so skip those pairs with a clear warning.
+    let dav_ok = !source.is_microsoft() && !destination.is_microsoft();
     let src_dav = dav_account(&source);
     let dst_dav = dav_account(&destination);
 
-    for pair in &selection.calendars {
-        emit(app, Progress::Phase { label: format!("Calendar: {}", pair.name) });
-        let r = dav::migrate(&src_dav, &pair.source, &dst_dav, &pair.dest, dav::DavKind::Calendar, dry_run)
-            .unwrap_or_else(|e| {
-                emit(app, Progress::Warning { message: format!("{}: {e}", pair.name) });
-                dav::DavReport::default()
-            });
-        report.calendars.push(NamedDavReport { name: pair.name.clone(), report: r });
-    }
+    let run_dav = |app: &tauri::AppHandle, pairs: &[DavPair], kind: dav::DavKind, out: &mut Vec<NamedDavReport>| {
+        for pair in pairs {
+            if !dav_ok {
+                emit(app, Progress::Warning {
+                    message: format!("{}: Microsoft 365 calendar/contacts migration isn't supported yet — skipped.", pair.name),
+                });
+                out.push(NamedDavReport { name: pair.name.clone(), report: dav::DavReport::default() });
+                continue;
+            }
+            emit(app, Progress::Phase { label: format!("{}", pair.name) });
+            let r = dav::migrate(&src_dav, &pair.source, &dst_dav, &pair.dest, kind, dry_run)
+                .unwrap_or_else(|e| {
+                    emit(app, Progress::Warning { message: format!("{}: {e}", pair.name) });
+                    dav::DavReport::default()
+                });
+            out.push(NamedDavReport { name: pair.name.clone(), report: r });
+        }
+    };
 
-    for pair in &selection.contacts {
-        emit(app, Progress::Phase { label: format!("Address book: {}", pair.name) });
-        let r = dav::migrate(&src_dav, &pair.source, &dst_dav, &pair.dest, dav::DavKind::Contacts, dry_run)
-            .unwrap_or_else(|e| {
-                emit(app, Progress::Warning { message: format!("{}: {e}", pair.name) });
-                dav::DavReport::default()
-            });
-        report.contacts.push(NamedDavReport { name: pair.name.clone(), report: r });
-    }
+    run_dav(app, &selection.calendars, dav::DavKind::Calendar, &mut report.calendars);
+    run_dav(app, &selection.contacts, dav::DavKind::Contacts, &mut report.contacts);
 
     Ok(report)
 }
@@ -502,17 +428,9 @@ async fn ms_sign_in(client_id: String) -> Result<microsoft::MsAccount, String> {
         .map_err(|e| format!("task failed: {e}"))?
 }
 
-/// Discover mail folders, calendars, and contact folders for a signed-in M365 account.
-#[tauri::command]
-async fn ms_probe(email: String) -> Result<microsoft::MsProbe, String> {
-    tokio::task::spawn_blocking(move || microsoft::probe(&email))
-        .await
-        .map_err(|e| format!("task failed: {e}"))?
-}
-
 fn main() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![probe, run_migration, ms_sign_in, ms_probe])
+        .invoke_handler(tauri::generate_handler![probe, run_migration, ms_sign_in])
         .run(tauri::generate_context!())
         .expect("error while running Godwit");
 }

@@ -2,7 +2,6 @@
   import { invoke } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
   import AccountEntry, { type Account, blankAccount } from "./lib/AccountEntry.svelte";
-  import MicrosoftPanel from "./lib/MicrosoftPanel.svelte";
 
   type FolderInfo = { name: string; delimiter: string | null; attributes: string[] };
   type DavCollection = { name: string; href: string; count: number | null };
@@ -51,9 +50,14 @@
   // keys off the domain, so it can't tell the two servers apart — the user must
   // set them explicitly.
   const sameEmail = $derived(
-    source.email.trim() !== "" &&
+    source.provider === "password" && destination.provider === "password" &&
+      source.email.trim() !== "" &&
       source.email.trim().toLowerCase() === destination.email.trim().toLowerCase(),
   );
+
+  // CalDAV/CardDAV migration only works when neither side is Microsoft 365
+  // (Graph JSON <-> ICS/vCard conversion isn't built yet).
+  const davSupported = $derived(source.provider !== "microsoft" && destination.provider !== "microsoft");
 
   function normalize(a: Account): Account {
     const clean = (s: string | null) => (s && s.trim() !== "" ? s.trim() : null);
@@ -82,9 +86,9 @@
     folderChecked = {};
     for (const f of sourceProbe.imap.folders) folderChecked[f.name] = true;
     calChecked = {};
-    for (const c of sourceProbe.calendars.collections) calChecked[c.href] = destMatch(destProbe.calendars.collections, c.name) !== null;
+    for (const c of sourceProbe.calendars.collections) calChecked[c.href] = davSupported && destMatch(destProbe.calendars.collections, c.name) !== null;
     abChecked = {};
-    for (const c of sourceProbe.contacts.collections) abChecked[c.href] = destMatch(destProbe.contacts.collections, c.name) !== null;
+    for (const c of sourceProbe.contacts.collections) abChecked[c.href] = davSupported && destMatch(destProbe.contacts.collections, c.name) !== null;
   }
 
   async function connect() {
@@ -292,10 +296,6 @@
     </section>
   {/if}
 
-  <details class="ms-section">
-    <summary>Microsoft 365 (experimental)</summary>
-    <MicrosoftPanel />
-  </details>
 </main>
 
 {#snippet statusCard(side: "source" | "dest", account: Account, probe: Probe)}
@@ -331,6 +331,7 @@
       </li>
     </ul>
 
+    {#if account.provider === "password"}
     <details class="servers" open={probe.imap.status !== "ok" || sameEmail}>
       <summary>Adjust servers</summary>
       <div class="fixers">
@@ -349,13 +350,16 @@
         <button class="try" onclick={() => retry(side)} disabled={busy || running}>{busy ? "Trying…" : "Try again"}</button>
       </div>
     </details>
+    {/if}
   </div>
 {/snippet}
 
 {#snippet davGroup(title: string, srcProbe: DavProbe, dstProbe: DavProbe, checked: Record<string, boolean>)}
   <div class="group">
     <h3>{title}</h3>
-    {#if srcProbe.status === "ok" && srcProbe.collections.length}
+    {#if !davSupported}
+      <p class="muted">Not available yet when a Microsoft 365 account is involved.</p>
+    {:else if srcProbe.status === "ok" && srcProbe.collections.length}
       <ul class="checklist">
         {#each srcProbe.collections as c (c.href)}
           {@const dest = dstProbe.collections.find((d) => d.name === c.name)?.href ?? null}
@@ -454,7 +458,4 @@
   .warnings { font-size: 0.83rem; color: var(--muted); }
   .warnings ul { margin: 8px 0 0; padding-left: 18px; }
   .warnings li { margin-bottom: 3px; word-break: break-word; }
-
-  .ms-section { margin-top: 32px; border-top: 1px solid var(--line); padding-top: 16px; }
-  .ms-section summary { cursor: pointer; font-weight: 600; font-size: 0.92rem; color: var(--muted); }
 </style>

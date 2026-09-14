@@ -1266,6 +1266,7 @@ name = "godwit"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "chrono",
  "hickory-resolver",
  "imap",
  "native-tls",

@@ -24,6 +24,8 @@ tokio = { version = "1", features = ["rt", "rt-multi-thread"] }
 # (Native-vs-imapsync is an open decision to revisit after this — see docs/MVP-SPEC.md.)
 imap = "2.4"
 native-tls = "0.2"
+# Dates for IMAP internal-date handling (matches the version `imap` uses).
+chrono = "0.4"
 
 # CalDAV / CardDAV: HTTP (PROPFIND/REPORT/GET/PUT) + XML multistatus parsing.
 reqwest = { version = "0.12", default-features = true, features = ["blocking", "json"] }

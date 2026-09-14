@@ -177,7 +177,7 @@ fn refresh_token(client_id: &str, refresh: &str) -> Result<TokenResponse, String
 }
 
 /// Return a currently-valid access token for the account, refreshing if needed.
-fn valid_access(email: &str) -> Result<String, String> {
+pub fn valid_access(email: &str) -> Result<String, String> {
     let guard = store().lock().unwrap();
     let session = guard.get(email).ok_or("Not signed in to this Microsoft account.")?;
     if session.expires_at > Instant::now() {
