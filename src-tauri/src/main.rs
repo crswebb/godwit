@@ -2,6 +2,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod autoconfig;
+mod convert;
 mod dav;
 mod mail;
 mod microsoft;
@@ -506,10 +507,112 @@ fn run_blocking(
         }
     };
 
+    // Calendars: CalDAV only for now (M365 Graph<->iCalendar is the next pass).
     run_dav(app, &selection.calendars, dav::DavKind::Calendar, &mut report.calendars);
-    run_dav(app, &selection.contacts, dav::DavKind::Contacts, &mut report.contacts);
+
+    // Contacts: works across DAV and Microsoft 365 (vCard <-> Graph).
+    for pair in &selection.contacts {
+        emit(app, Progress::Phase { label: pair.name.clone() });
+        let r = migrate_contacts(app, &source, &destination, pair, dry_run);
+        report.contacts.push(NamedDavReport { name: pair.name.clone(), report: r });
+    }
 
     Ok(report)
+}
+
+fn sanitize_name(s: &str) -> String {
+    s.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect()
+}
+
+/// Read a side's contacts as vCard strings, from DAV or Microsoft 365.
+fn read_side_vcards(account: &Account, collection: &str) -> Result<Vec<String>, String> {
+    if account.is_microsoft() {
+        Ok(microsoft::list_contacts(&account.email)?
+            .iter()
+            .map(convert::graph_contact_to_vcard)
+            .collect())
+    } else {
+        dav::read_items(&dav_account(account), collection)
+    }
+}
+
+/// Write one contact (given as vCard) to a side, DAV or Microsoft 365.
+fn write_side_contact(account: &Account, collection: &str, vcard: &str) -> Result<(), String> {
+    if account.is_microsoft() {
+        microsoft::create_contact(&account.email, &convert::vcard_to_graph_contact(vcard))
+    } else {
+        let key = convert::contact_key(vcard);
+        let base = if key.is_empty() { "contact".to_string() } else { sanitize_name(&key) };
+        dav::write_item(
+            &dav_account(account),
+            collection,
+            &format!("{base}.vcf"),
+            "text/vcard; charset=utf-8",
+            vcard,
+        )
+    }
+}
+
+fn migrate_contacts(
+    app: &tauri::AppHandle,
+    source: &Account,
+    destination: &Account,
+    pair: &DavPair,
+    dry_run: bool,
+) -> dav::DavReport {
+    let src = match read_side_vcards(source, &pair.source) {
+        Ok(v) => v,
+        Err(e) => {
+            emit(app, Progress::Warning { message: format!("{}: {e}", pair.name) });
+            return dav::DavReport::default();
+        }
+    };
+    let dst_keys: std::collections::HashSet<String> = match read_side_vcards(destination, &pair.dest) {
+        Ok(v) => v.iter().map(|c| convert::contact_key(c)).filter(|k| !k.is_empty()).collect(),
+        Err(e) => {
+            emit(app, Progress::Warning { message: format!("{}: {e}", pair.name) });
+            return dav::DavReport::default();
+        }
+    };
+
+    let to_copy: Vec<&String> = src
+        .iter()
+        .filter(|c| {
+            let k = convert::contact_key(c);
+            !k.is_empty() && !dst_keys.contains(&k)
+        })
+        .collect();
+
+    let mut report = dav::DavReport {
+        total: src.len() as u32,
+        skipped: (src.len() - to_copy.len()) as u32,
+        ..Default::default()
+    };
+    if dry_run {
+        report.copied = to_copy.len() as u32;
+        return report;
+    }
+
+    for c in &to_copy {
+        match write_side_contact(destination, &pair.dest, c) {
+            Ok(()) => report.copied += 1,
+            Err(e) => {
+                report.failed += 1;
+                emit(app, Progress::Warning { message: format!("{}: {e}", pair.name) });
+            }
+        }
+    }
+
+    if let Ok(after) = read_side_vcards(destination, &pair.dest) {
+        let after_keys: std::collections::HashSet<String> =
+            after.iter().map(|c| convert::contact_key(c)).collect();
+        report.missing = src
+            .iter()
+            .map(|c| convert::contact_key(c))
+            .filter(|k| !k.is_empty() && !after_keys.contains(k))
+            .count() as u32;
+    }
+    report
 }
 
 /// Sign in to a Microsoft 365 account via OAuth (opens the system browser).

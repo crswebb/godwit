@@ -300,3 +300,47 @@ pub fn probe(email: &str) -> Result<MsProbe, String> {
 
     Ok(MsProbe { folders, calendars, contact_folders })
 }
+
+/// List all contacts in the account's default contact folder (Graph JSON).
+pub fn list_contacts(email: &str) -> Result<Vec<Value>, String> {
+    let access = valid_access(email)?;
+    let client = reqwest::blocking::Client::new();
+    let mut url = format!("{GRAPH}/me/contacts?$top=100");
+    let mut out = Vec::new();
+    loop {
+        let resp = client
+            .get(&url)
+            .bearer_auth(&access)
+            .send()
+            .map_err(|e| format!("contacts GET: {e}"))?;
+        if !resp.status().is_success() {
+            return Err(format!("contacts -> HTTP {}", resp.status().as_u16()));
+        }
+        let v: Value = resp.json().map_err(|e| format!("contacts parse: {e}"))?;
+        if let Some(arr) = v["value"].as_array() {
+            out.extend(arr.iter().cloned());
+        }
+        match v["@odata.nextLink"].as_str() {
+            Some(next) => url = next.to_string(),
+            None => break,
+        }
+    }
+    Ok(out)
+}
+
+/// Create a contact in the account's default contact folder.
+pub fn create_contact(email: &str, contact: &Value) -> Result<(), String> {
+    let access = valid_access(email)?;
+    let client = reqwest::blocking::Client::new();
+    let resp = client
+        .post(format!("{GRAPH}/me/contacts"))
+        .bearer_auth(&access)
+        .json(contact)
+        .send()
+        .map_err(|e| format!("contact create: {e}"))?;
+    if resp.status().is_success() {
+        Ok(())
+    } else {
+        Err(format!("contact create -> HTTP {}", resp.status().as_u16()))
+    }
+}

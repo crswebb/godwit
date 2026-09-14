@@ -271,6 +271,52 @@ pub fn migrate(
     Ok(report)
 }
 
+/// Read every item body (.ics/.vcf) in a collection as text.
+pub fn read_items(acc: &DavAccount, collection: &str) -> Result<Vec<String>, String> {
+    let client = http_client()?;
+    let coll = Url::parse(collection).map_err(|e| format!("bad collection URL: {e}"))?;
+    let mut out = Vec::new();
+    for u in list_item_urls(&client, acc, &coll)? {
+        let resp = client
+            .get(u.clone())
+            .basic_auth(&acc.username, Some(&acc.password))
+            .send()
+            .map_err(|e| format!("GET {u}: {e}"))?;
+        if resp.status().is_success() {
+            if let Ok(text) = resp.text() {
+                out.push(text);
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Write one item (.ics/.vcf) into a collection under `name`.
+pub fn write_item(
+    acc: &DavAccount,
+    collection: &str,
+    name: &str,
+    content_type: &str,
+    body: &str,
+) -> Result<(), String> {
+    let client = http_client()?;
+    let mut coll = Url::parse(collection).map_err(|e| format!("bad collection URL: {e}"))?;
+    ensure_trailing_slash(&mut coll);
+    let target = coll.join(name).map_err(|e| format!("resolve target: {e}"))?;
+    let resp = client
+        .put(target)
+        .basic_auth(&acc.username, Some(&acc.password))
+        .header("Content-Type", content_type)
+        .body(body.to_string())
+        .send()
+        .map_err(|e| format!("PUT: {e}"))?;
+    if resp.status().is_success() {
+        Ok(())
+    } else {
+        Err(format!("PUT -> HTTP {}", resp.status().as_u16()))
+    }
+}
+
 /// List the absolute URLs of the item resources (.ics/.vcf) in a collection.
 fn list_item_urls(client: &Client, acc: &DavAccount, coll: &Url) -> Result<Vec<Url>, String> {
     let body = r#"<?xml version="1.0" encoding="utf-8"?><d:propfind xmlns:d="DAV:"><d:prop><d:getcontenttype/></d:prop></d:propfind>"#;
