@@ -25,6 +25,17 @@ pub struct DavAccount {
     pub url: Option<String>,
     pub username: String,
     pub password: String,
+    /// OAuth bearer token; when present it's used instead of Basic auth
+    /// (e.g. Google CalDAV/CardDAV).
+    #[serde(default)]
+    pub bearer: Option<String>,
+}
+
+fn apply_auth(req: reqwest::blocking::RequestBuilder, acc: &DavAccount) -> reqwest::blocking::RequestBuilder {
+    match &acc.bearer {
+        Some(token) => req.bearer_auth(token),
+        None => req.basic_auth(&acc.username, Some(&acc.password)),
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
@@ -82,9 +93,7 @@ fn propfind(
     let mut current = url.clone();
     for _ in 0..6 {
         let method = Method::from_bytes(b"PROPFIND").expect("valid method");
-        let resp = client
-            .request(method, current.clone())
-            .basic_auth(&acc.username, Some(&acc.password))
+        let resp = apply_auth(client.request(method, current.clone()), acc)
             .header("Depth", depth)
             .header("Content-Type", "application/xml; charset=utf-8")
             .body(body.to_string())
@@ -191,9 +200,7 @@ pub fn read_items(acc: &DavAccount, collection: &str) -> Result<Vec<String>, Str
     let coll = Url::parse(collection).map_err(|e| format!("bad collection URL: {e}"))?;
     let mut out = Vec::new();
     for u in list_item_urls(&client, acc, &coll)? {
-        let resp = client
-            .get(u.clone())
-            .basic_auth(&acc.username, Some(&acc.password))
+        let resp = apply_auth(client.get(u.clone()), acc)
             .send()
             .map_err(|e| format!("GET {u}: {e}"))?;
         if resp.status().is_success() {
@@ -217,9 +224,7 @@ pub fn write_item(
     let mut coll = Url::parse(collection).map_err(|e| format!("bad collection URL: {e}"))?;
     ensure_trailing_slash(&mut coll);
     let target = coll.join(name).map_err(|e| format!("resolve target: {e}"))?;
-    let resp = client
-        .put(target)
-        .basic_auth(&acc.username, Some(&acc.password))
+    let resp = apply_auth(client.put(target), acc)
         .header("Content-Type", content_type)
         .body(body.to_string())
         .send()

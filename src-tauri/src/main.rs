@@ -9,13 +9,15 @@ mod dav;
 mod domain;
 mod engine;
 mod microsoft;
+mod oauth;
 
 fn main() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
             commands::probe,
             commands::run_migration,
-            commands::ms_sign_in
+            commands::ms_sign_in,
+            commands::google_sign_in
         ])
         .run(tauri::generate_context!())
         .expect("error while running Godwit");

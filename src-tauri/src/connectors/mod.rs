@@ -3,6 +3,7 @@
 //! source and destination connector to the engine, the same way for every
 //! provider combination.
 
+pub mod google;
 pub mod imapdav;
 pub mod ms365;
 
@@ -31,10 +32,10 @@ pub trait Connector {
 }
 
 pub fn build(account: &Account) -> Box<dyn Connector> {
-    if account.is_microsoft() {
-        Box::new(ms365::Ms365Connector::new(account.clone()))
-    } else {
-        Box::new(imapdav::ImapDavConnector::new(account.clone()))
+    match account.provider.as_str() {
+        "microsoft" => Box::new(ms365::Ms365Connector::new(account.clone())),
+        "google" => Box::new(google::GoogleConnector::new(account.clone())),
+        _ => Box::new(imapdav::ImapDavConnector::new(account.clone())),
     }
 }
 

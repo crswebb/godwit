@@ -1,7 +1,7 @@
 // Shapes shared with the Rust backend (must match the serde output in
 // src-tauri/src/domain.rs). Single source of truth for the frontend.
 
-export type Provider = "password" | "microsoft";
+export type Provider = "password" | "microsoft" | "google";
 
 export type Account = {
   email: string;

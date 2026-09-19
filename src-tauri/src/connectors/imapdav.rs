@@ -34,6 +34,51 @@ fn open_session(creds: &ImapCreds) -> Result<ImapSession, String> {
         .map_err(|(e, _c)| format!("Login failed: {e}"))
 }
 
+/// XOAUTH2 SASL authenticator (Gmail and other OAuth-only IMAP servers).
+struct XOAuth2 {
+    user: String,
+    token: String,
+}
+
+impl imap::Authenticator for XOAuth2 {
+    type Response = String;
+    fn process(&self, _challenge: &[u8]) -> Self::Response {
+        format!("user={}\x01auth=Bearer {}\x01\x01", self.user, self.token)
+    }
+}
+
+fn open_xoauth2(host: &str, port: u16, user: &str, token: &str) -> Result<ImapSession, String> {
+    let tls = native_tls::TlsConnector::builder()
+        .build()
+        .map_err(|e| format!("TLS setup failed: {e}"))?;
+    let client = imap::connect((host, port), host, &tls).map_err(|e| format!("Connection failed: {e}"))?;
+    let auth = XOAuth2 { user: user.to_string(), token: token.to_string() };
+    client.authenticate("XOAUTH2", &auth).map_err(|(e, _c)| format!("XOAUTH2 auth failed: {e}"))
+}
+
+/// Build an engine mail reader over an XOAUTH2 IMAP session (e.g. Gmail).
+pub fn xoauth2_reader(host: &str, port: u16, user: &str, token: &str) -> Result<Box<dyn Reader>, String> {
+    Ok(Box::new(ImapReader { session: open_xoauth2(host, port, user, token)?, selected: None }))
+}
+
+pub fn xoauth2_writer(host: &str, port: u16, user: &str, token: &str) -> Result<Box<dyn Writer>, String> {
+    Ok(Box::new(ImapWriter { session: open_xoauth2(host, port, user, token)? }))
+}
+
+pub fn xoauth2_folders(host: &str, port: u16, user: &str, token: &str) -> Result<Vec<FolderInfo>, String> {
+    list_folders_session(open_xoauth2(host, port, user, token)?)
+}
+
+/// Build engine calendar/contacts reader/writer over a DAV account (which may
+/// carry a bearer token — used by the Google connector).
+pub fn dav_reader(account: dav::DavAccount, kind: dav::DavKind) -> Box<dyn Reader> {
+    Box::new(DavReader { account, kind, cache: Vec::new() })
+}
+
+pub fn dav_writer(account: dav::DavAccount, kind: dav::DavKind) -> Box<dyn Writer> {
+    Box::new(DavWriter { account, kind })
+}
+
 fn imap_message_id(f: &imap::types::Fetch) -> String {
     f.envelope()
         .and_then(|e| e.message_id.as_deref())
@@ -268,12 +313,16 @@ impl ImapDavConnector {
             url: self.account.dav_url.clone(),
             username: self.account.email.clone(),
             password: self.account.password.clone(),
+            bearer: None,
         }
     }
 }
 
 fn list_folders(creds: &ImapCreds) -> Result<Vec<FolderInfo>, String> {
-    let mut session = open_session(creds)?;
+    list_folders_session(open_session(creds)?)
+}
+
+fn list_folders_session(mut session: ImapSession) -> Result<Vec<FolderInfo>, String> {
     let result = session
         .list(Some(""), Some("*"))
         .map_err(|e| format!("LIST failed: {e}"))

@@ -34,3 +34,11 @@ pub async fn ms_sign_in(client_id: String) -> Result<microsoft::MsAccount, Strin
         .await
         .map_err(|e| format!("task failed: {e}"))?
 }
+
+/// Sign in to a Google account via OAuth (opens the system browser).
+#[tauri::command]
+pub async fn google_sign_in(client_id: String) -> Result<connectors::google::GoogleAccount, String> {
+    tokio::task::spawn_blocking(move || connectors::google::sign_in(&client_id))
+        .await
+        .map_err(|e| format!("task failed: {e}"))?
+}

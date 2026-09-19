@@ -1,11 +1,13 @@
 <script lang="ts" module>
-  // The Godwit app registered in the CRS Webbproduktion tenant (public id, not a secret).
+  // Godwit's registered OAuth clients (public ids, not secrets).
   const MS_CLIENT_ID = "5746290e-9198-489b-b325-be452af41cc5";
+  // Filled in once the Google Cloud OAuth client is created (see docs/google-setup.md).
+  const GOOGLE_CLIENT_ID = "";
 </script>
 
 <script lang="ts">
-  import type { Account } from "./types";
-  import { errorText, msSignIn } from "./api";
+  import type { Account, Provider } from "./types";
+  import { errorText, googleSignIn, msSignIn } from "./api";
 
   let {
     label,
@@ -16,13 +18,17 @@
   let signingIn = $state(false);
   let signInError = $state<string | null>(null);
 
-  async function signInMicrosoft() {
+  async function signIn(provider: Provider, clientId: string, run: (id: string) => Promise<{ email: string }>) {
+    if (clientId.trim() === "") {
+      signInError = provider === "google" ? "Google sign-in isn't configured yet." : "Client ID not set.";
+      return;
+    }
     signingIn = true;
     signInError = null;
     try {
-      const result = await msSignIn(MS_CLIENT_ID);
+      const result = await run(clientId);
       account.email = result.email;
-      account.provider = "microsoft";
+      account.provider = provider;
     } catch (err) {
       signInError = errorText(err);
     } finally {
@@ -30,22 +36,29 @@
     }
   }
 
-  function usePassword() {
-    account.provider = "password";
-  }
+  const signInMicrosoft = () => signIn("microsoft", MS_CLIENT_ID, msSignIn);
+  const signInGoogle = () => signIn("google", GOOGLE_CLIENT_ID, googleSignIn);
+  const usePassword = () => { account.provider = "password"; };
+
+  const providerName = $derived(account.provider === "google" ? "Google" : "Microsoft 365");
 </script>
 
 <fieldset {disabled}>
   <legend>{label}</legend>
 
-  {#if account.provider === "microsoft"}
-    <div class="ms">
-      <span class="badge">Microsoft 365</span>
+  {#if account.provider === "microsoft" || account.provider === "google"}
+    <div class="oauth">
+      <span class="badge">{providerName}</span>
       {#if account.email}
         <p class="signed">Signed in as <strong>{account.email}</strong></p>
       {:else}
-        <button type="button" class="ms-btn" onclick={signInMicrosoft} disabled={signingIn}>
-          {signingIn ? "Waiting for browser…" : "Sign in with Microsoft"}
+        <button
+          type="button"
+          class="oauth-btn"
+          onclick={account.provider === "google" ? signInGoogle : signInMicrosoft}
+          disabled={signingIn}
+        >
+          {signingIn ? "Waiting for browser…" : `Sign in with ${providerName}`}
         </button>
       {/if}
       {#if signInError}<p class="err">{signInError}</p>{/if}
@@ -60,9 +73,10 @@
       <span>Password / app password</span>
       <input type="password" bind:value={account.password} autocomplete="off" />
     </label>
-    <button type="button" class="link" onclick={signInMicrosoft} disabled={signingIn}>
-      {signingIn ? "Waiting for browser…" : "Use Microsoft 365 instead"}
-    </button>
+    <div class="providers">
+      <button type="button" class="link" onclick={signInMicrosoft} disabled={signingIn}>Use Microsoft 365</button>
+      <button type="button" class="link" onclick={signInGoogle} disabled={signingIn}>Use Google</button>
+    </div>
     {#if signInError}<p class="err">{signInError}</p>{/if}
   {/if}
 </fieldset>
@@ -89,17 +103,18 @@
   input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
   fieldset:disabled { opacity: 0.6; }
 
-  .ms { display: flex; flex-direction: column; gap: 10px; align-items: flex-start; }
+  .oauth { display: flex; flex-direction: column; gap: 10px; align-items: flex-start; }
   .badge {
     font-size: 0.72rem; font-weight: 600; padding: 2px 8px; border-radius: 999px;
     background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--accent);
   }
   .signed { margin: 0; font-size: 0.85rem; }
-  .ms-btn {
+  .oauth-btn {
     padding: 9px 14px; border: none; border-radius: 8px;
     background: var(--accent); color: var(--accent-ink); font-weight: 600; cursor: pointer;
   }
-  .ms-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  .oauth-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  .providers { display: flex; gap: 14px; }
   .link {
     background: none; border: none; padding: 0; color: var(--accent);
     font-size: 0.8rem; cursor: pointer; text-align: left;

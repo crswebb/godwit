@@ -30,6 +30,9 @@ export const runMigration = (
 export const msSignIn = (clientId: string): Promise<{ email: string }> =>
   invoke<{ email: string }>("ms_sign_in", { clientId });
 
+export const googleSignIn = (clientId: string): Promise<{ email: string }> =>
+  invoke<{ email: string }>("google_sign_in", { clientId });
+
 /// Subscribe to migration progress; returns an unsubscribe function.
 export function onProgress(cb: (p: Progress) => void): () => void {
   const unlisten = listen<Progress>("migration://progress", (event) => cb(event.payload));

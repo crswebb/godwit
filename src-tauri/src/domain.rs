@@ -25,12 +25,6 @@ pub struct Account {
     pub provider: String,
 }
 
-impl Account {
-    pub fn is_microsoft(&self) -> bool {
-        self.provider == "microsoft"
-    }
-}
-
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FolderInfo {
