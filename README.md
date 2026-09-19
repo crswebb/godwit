@@ -96,4 +96,5 @@ Next: keychain token persistence, a Google connector, and packaging/signing for 
 - [`docs/MVP-SPEC.md`](docs/MVP-SPEC.md) — phased scope, auth matrix, first-migration test plan.
 - [`docs/DECISIONS.md`](docs/DECISIONS.md) — key decisions and their rationale.
 - [`docs/microsoft-setup.md`](docs/microsoft-setup.md) — one-time Microsoft 365 (Entra) app registration.
+- [`docs/google-setup.md`](docs/google-setup.md) — bring-your-own Google (Gmail) OAuth client, or app password.
 - [`docs/architecture-diagram.html`](docs/architecture-diagram.html) — rendered diagrams for quick viewing.

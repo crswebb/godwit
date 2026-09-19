@@ -1,13 +1,7 @@
-<script lang="ts" module>
-  // Godwit's registered OAuth clients (public ids, not secrets).
-  const MS_CLIENT_ID = "5746290e-9198-489b-b325-be452af41cc5";
-  // Filled in once the Google Cloud OAuth client is created (see docs/google-setup.md).
-  const GOOGLE_CLIENT_ID = "";
-</script>
-
 <script lang="ts">
   import type { Account, Provider } from "./types";
   import { errorText, googleSignIn, msSignIn } from "./api";
+  import { getClientId } from "./settings";
 
   let {
     label,
@@ -18,9 +12,12 @@
   let signingIn = $state(false);
   let signInError = $state<string | null>(null);
 
-  async function signIn(provider: Provider, clientId: string, run: (id: string) => Promise<{ email: string }>) {
+  async function signIn(provider: Provider, run: (id: string) => Promise<{ email: string }>) {
+    const clientId = getClientId(provider);
     if (clientId.trim() === "") {
-      signInError = provider === "google" ? "Google sign-in isn't configured yet." : "Client ID not set.";
+      const which = provider === "google" ? "Google" : "Microsoft";
+      const doc = provider === "google" ? "google-setup.md" : "microsoft-setup.md";
+      signInError = `No ${which} client ID set — add one under Settings (see docs/${doc}).`;
       return;
     }
     signingIn = true;
@@ -36,8 +33,8 @@
     }
   }
 
-  const signInMicrosoft = () => signIn("microsoft", MS_CLIENT_ID, msSignIn);
-  const signInGoogle = () => signIn("google", GOOGLE_CLIENT_ID, googleSignIn);
+  const signInMicrosoft = () => signIn("microsoft", msSignIn);
+  const signInGoogle = () => signIn("google", googleSignIn);
   const usePassword = () => { account.provider = "password"; };
 
   const providerName = $derived(account.provider === "google" ? "Google" : "Microsoft 365");

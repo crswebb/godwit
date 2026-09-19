@@ -1,8 +1,18 @@
-# Google (Gmail) setup — one-time, by the developer
+# Google (Gmail) setup — bring your own client ID
 
-Godwit signs in to Google with OAuth 2.0 (PKCE, public desktop client) and then
-uses **Gmail over IMAP (XOAUTH2)** for mail and **Google CalDAV/CardDAV** for
-calendar/contacts. You register an OAuth client once; users never see it.
+Godwit signs in to Google with OAuth 2.0 (PKCE, public desktop client), then uses
+**Gmail over IMAP (XOAUTH2)** for mail and **Google CalDAV/CardDAV** for
+calendar/contacts.
+
+Godwit ships **no** Google client ID: Gmail's scope is *restricted*, so a shared
+client would either cap at 100 users or require the maintainer to pay for a CASA
+security assessment. Instead — like rclone and DAVx⁵ — **you create your own
+Google OAuth client** (5 minutes, free). Because you're the only user of your own
+app, the 100-user cap and CASA simply don't apply to you.
+
+**Prefer no setup at all?** Use an **app-specific password** instead: enable
+2-step verification on the Google account, generate an app password, and use
+Godwit's plain email + password with `imap.gmail.com`. No client ID needed.
 
 ## Heads-up on `gcloud`
 
@@ -25,8 +35,8 @@ project, but plan on doing the OAuth bits in the Cloud Console.
 5. **Credentials → Create credentials → OAuth client ID → Application type:
    Desktop app.** Copy the **Client ID** (the secret is unused — PKCE is a public
    client).
-6. Put the Client ID into Godwit: set `GOOGLE_CLIENT_ID` in
-   `src/lib/AccountEntry.svelte` (or hand it to Claude to fill in).
+6. Put the Client ID into Godwit: open **Settings** in the app and paste it into
+   **Google client ID**. It's stored locally on your device.
 
 ## The restricted-scope catch
 

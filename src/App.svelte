@@ -3,6 +3,7 @@
   import DiscoveryCard from "./lib/DiscoveryCard.svelte";
   import CollectionGroup from "./lib/CollectionGroup.svelte";
   import MigrationProgress from "./lib/MigrationProgress.svelte";
+  import Settings from "./lib/Settings.svelte";
   import { blankAccount } from "./lib/types";
   import type { Account, Current, DavCollection, Probe, UnifiedReport } from "./lib/types";
   import { errorText, onProgress, probeAccount, runMigration } from "./lib/api";
@@ -220,6 +221,11 @@
   {#if running || report}
     <MigrationProgress {current} {report} {dryRun} {warnings} />
   {/if}
+
+  <details class="settings-section">
+    <summary>Settings</summary>
+    <Settings />
+  </details>
 </main>
 
 <style>
@@ -259,4 +265,7 @@
 
   .controls { margin-top: 10px; display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
   .dry { display: flex; align-items: flex-start; gap: 9px; font-size: 0.85rem; color: var(--muted); }
+
+  .settings-section { margin-top: 34px; border-top: 1px solid var(--line); padding-top: 16px; }
+  .settings-section summary { cursor: pointer; font-weight: 600; font-size: 0.92rem; color: var(--muted); }
 </style>
