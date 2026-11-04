@@ -2,6 +2,7 @@
   "name": "godwit",
   "version": "0.1.0",
   "description": "Privacy-first email, calendar & contacts migration — any provider to any provider.",
+  "license": "MIT",
   "type": "module",
   "scripts": {
     "dev": "vite",

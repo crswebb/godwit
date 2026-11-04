@@ -3,6 +3,7 @@ name = "godwit"
 version = "0.1.0"
 description = "Privacy-first email, calendar & contacts migration"
 authors = ["Stefan Bergfeldt"]
+license = "MIT"
 edition = "2021"
 rust-version = "1.77"
 
