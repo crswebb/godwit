@@ -5,6 +5,7 @@
 
 pub mod google;
 pub mod imapdav;
+pub mod jmap;
 pub mod ms365;
 
 use crate::domain::{
@@ -35,6 +36,7 @@ pub fn build(account: &Account) -> Box<dyn Connector> {
     match account.provider.as_str() {
         "microsoft" => Box::new(ms365::Ms365Connector::new(account.clone())),
         "google" => Box::new(google::GoogleConnector::new(account.clone())),
+        "jmap" => Box::new(jmap::JmapConnector::new(account.clone())),
         _ => Box::new(imapdav::ImapDavConnector::new(account.clone())),
     }
 }

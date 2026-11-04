@@ -183,6 +183,446 @@ pub fn contact_key(vcard: &str) -> String {
     fn_val
 }
 
+// --- Contacts: JSContact <-> vCard (RFC 9553 / RFC 9555) ------------------
+//
+// JMAP contacts (RFC 9610) carry JSContact `Card` objects, not vCard. These
+// pure converters bridge JSContact to the canonical vCard 3.0 that every other
+// connector speaks, following RFC 9555's mapping for the common properties
+// (name, emails, phones, organizations, titles, addresses, notes, nicknames,
+// birthday). Exotic/implementation-specific properties are passed over rather
+// than guessed at.
+
+/// vCard structured-value separator join: escape each component, join with ';'.
+fn join_structured(parts: &[String]) -> String {
+    parts.iter().map(|p| escape_vcard(p)).collect::<Vec<_>>().join(";")
+}
+
+/// Collect JSContact `name.components` into (family, given, additional, prefix, suffix).
+fn jscontact_name_parts(name: &Value) -> (String, String, String, String, String) {
+    let mut by_kind: HashMap<&str, Vec<String>> = HashMap::new();
+    if let Some(components) = name.get("components").and_then(Value::as_array) {
+        for c in components {
+            if let (Some(kind), Some(val)) = (c.get("kind").and_then(Value::as_str), c.get("value").and_then(Value::as_str)) {
+                if !val.is_empty() {
+                    by_kind.entry(kind).or_default().push(val.to_string());
+                }
+            }
+        }
+    }
+    let join = |k: &str| by_kind.get(k).map(|v| v.join(" ")).unwrap_or_default();
+    let family = [join("surname"), join("surname2")].iter().filter(|s| !s.is_empty()).cloned().collect::<Vec<_>>().join(" ");
+    let suffix = ["generation", "credential"].iter().map(|k| join(k)).filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" ");
+    (family, join("given"), join("given2"), join("title"), suffix)
+}
+
+fn first_object_value(v: &Value, key: &str) -> Option<Value> {
+    v.get(key).and_then(Value::as_object).and_then(|m| m.values().next().cloned())
+}
+
+fn contexts_to_vcard_type(obj: &Value) -> Vec<String> {
+    let mut types = Vec::new();
+    if let Some(ctx) = obj.get("contexts").and_then(Value::as_object) {
+        for (k, val) in ctx {
+            if val.as_bool() == Some(true) {
+                match k.as_str() {
+                    "work" => types.push("WORK".to_string()),
+                    "private" => types.push("HOME".to_string()),
+                    _ => {}
+                }
+            }
+        }
+    }
+    types
+}
+
+fn partial_date_to_vcard(date: &Value) -> Option<String> {
+    if let Some(utc) = date.get("utc").and_then(Value::as_str) {
+        return (utc.len() >= 10).then(|| utc[..10].to_string());
+    }
+    let y = date.get("year").and_then(Value::as_u64);
+    let m = date.get("month").and_then(Value::as_u64);
+    let d = date.get("day").and_then(Value::as_u64);
+    match (y, m, d) {
+        (Some(y), Some(m), Some(d)) => Some(format!("{y:04}-{m:02}-{d:02}")),
+        (Some(y), Some(m), None) => Some(format!("{y:04}-{m:02}")),
+        (Some(y), None, None) => Some(format!("{y:04}")),
+        (None, Some(m), Some(d)) => Some(format!("--{m:02}-{d:02}")),
+        _ => None,
+    }
+}
+
+/// Convert a JSContact `Card` (RFC 9553) to a vCard 3.0 string.
+pub fn jscontact_to_vcard(card: &Value) -> String {
+    let mut lines = vec!["BEGIN:VCARD".to_string(), "VERSION:3.0".to_string()];
+
+    let name = card.get("name").cloned().unwrap_or(Value::Null);
+    let (family, given, given2, prefix, suffix) = jscontact_name_parts(&name);
+
+    // FN: prefer name.full, else assembled given+family, else org, else email.
+    let full = name
+        .get("full")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| format!("{given} {family}").trim().to_string());
+    let org_name = first_object_value(card, "organizations")
+        .and_then(|o| o.get("name").and_then(Value::as_str).map(str::to_string));
+    let first_email = first_object_value(card, "emails").and_then(|e| e.get("address").and_then(Value::as_str).map(str::to_string));
+    let fn_val = [Some(full.clone()), org_name.clone(), first_email.clone()]
+        .into_iter()
+        .flatten()
+        .find(|s| !s.is_empty())
+        .unwrap_or_default();
+    lines.push(format!("FN:{}", escape_vcard(&fn_val)));
+    if !(family.is_empty() && given.is_empty() && given2.is_empty() && prefix.is_empty() && suffix.is_empty()) {
+        lines.push(format!("N:{}", join_structured(&[family, given, given2, prefix, suffix])));
+    }
+
+    if let Some(nicks) = card.get("nicknames").and_then(Value::as_object) {
+        let names: Vec<String> = nicks.values().filter_map(|n| n.get("name").and_then(Value::as_str)).map(|s| escape_vcard(s)).collect();
+        if !names.is_empty() {
+            lines.push(format!("NICKNAME:{}", names.join(",")));
+        }
+    }
+
+    if let Some(emails) = card.get("emails").and_then(Value::as_object) {
+        for e in emails.values() {
+            if let Some(addr) = e.get("address").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+                let mut types = vec!["INTERNET".to_string()];
+                types.extend(contexts_to_vcard_type(e));
+                lines.push(format!("EMAIL;TYPE={}:{}", types.join(","), escape_vcard(addr)));
+            }
+        }
+    }
+
+    if let Some(phones) = card.get("phones").and_then(Value::as_object) {
+        for p in phones.values() {
+            if let Some(num) = p.get("number").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+                let num = num.strip_prefix("tel:").unwrap_or(num);
+                let mut types = Vec::new();
+                if let Some(f) = p.get("features").and_then(Value::as_object) {
+                    if f.get("mobile").and_then(Value::as_bool) == Some(true) {
+                        types.push("CELL".to_string());
+                    }
+                    if f.get("fax").and_then(Value::as_bool) == Some(true) {
+                        types.push("FAX".to_string());
+                    }
+                }
+                types.extend(contexts_to_vcard_type(p));
+                if types.is_empty() {
+                    types.push("VOICE".to_string());
+                }
+                lines.push(format!("TEL;TYPE={}:{}", types.join(","), escape_vcard(num)));
+            }
+        }
+    }
+
+    if let Some(orgs) = card.get("organizations").and_then(Value::as_object) {
+        for o in orgs.values() {
+            let mut parts = Vec::new();
+            if let Some(n) = o.get("name").and_then(Value::as_str) {
+                parts.push(n.to_string());
+            }
+            if let Some(units) = o.get("units").and_then(Value::as_array) {
+                for u in units {
+                    if let Some(n) = u.get("name").and_then(Value::as_str) {
+                        parts.push(n.to_string());
+                    }
+                }
+            }
+            if !parts.is_empty() {
+                lines.push(format!("ORG:{}", join_structured(&parts)));
+            }
+        }
+    }
+
+    if let Some(titles) = card.get("titles").and_then(Value::as_object) {
+        for t in titles.values() {
+            if let Some(n) = t.get("name").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+                let prop = if t.get("kind").and_then(Value::as_str) == Some("role") { "ROLE" } else { "TITLE" };
+                lines.push(format!("{prop}:{}", escape_vcard(n)));
+            }
+        }
+    }
+
+    if let Some(addresses) = card.get("addresses").and_then(Value::as_object) {
+        for a in addresses.values() {
+            if let Some(line) = jscontact_address_to_vcard(a) {
+                lines.push(line);
+            }
+        }
+    }
+
+    if let Some(note) = first_object_value(card, "notes").and_then(|n| n.get("note").and_then(Value::as_str).map(str::to_string)) {
+        if !note.is_empty() {
+            lines.push(format!("NOTE:{}", escape_vcard(&note)));
+        }
+    }
+
+    if let Some(anns) = card.get("anniversaries").and_then(Value::as_object) {
+        if let Some(birth) = anns.values().find(|a| a.get("kind").and_then(Value::as_str) == Some("birth")) {
+            if let Some(date) = birth.get("date").and_then(partial_date_to_vcard) {
+                lines.push(format!("BDAY:{date}"));
+            }
+        }
+    }
+
+    if let Some(uid) = card.get("uid").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+        lines.push(format!("UID:{}", escape_vcard(uid)));
+    }
+
+    lines.push("END:VCARD".to_string());
+    lines.join("\r\n")
+}
+
+/// vCard ADR components, in order: PO box; extended; street; locality; region;
+/// postcode; country.
+fn jscontact_address_to_vcard(a: &Value) -> Option<String> {
+    let mut slots = ["", "", "", "", "", "", ""].map(String::from);
+    let mut push = |i: usize, s: &str| {
+        if !slots[i].is_empty() {
+            slots[i].push(' ');
+        }
+        slots[i].push_str(s);
+    };
+    if let Some(components) = a.get("components").and_then(Value::as_array) {
+        for c in components {
+            let (Some(kind), Some(val)) = (c.get("kind").and_then(Value::as_str), c.get("value").and_then(Value::as_str)) else { continue };
+            match kind {
+                "postOfficeBox" => push(0, val),
+                "apartment" | "floor" | "room" | "building" => push(1, val),
+                "number" | "name" | "block" | "landmark" => push(2, val),
+                "locality" => push(3, val),
+                "region" => push(4, val),
+                "postcode" => push(5, val),
+                "country" => push(6, val),
+                _ => {}
+            }
+        }
+    } else if let Some(full) = a.get("full").and_then(Value::as_str) {
+        push(2, full); // only a free-form address available → street slot
+    }
+    if slots.iter().all(|s| s.is_empty()) {
+        return None;
+    }
+    let mut types = contexts_to_vcard_type(a);
+    if types.is_empty() {
+        types.push("HOME".to_string());
+    }
+    Some(format!("ADR;TYPE={}:{}", types.join(","), join_structured(&slots)))
+}
+
+/// Convert a vCard string to a JSContact `Card` (RFC 9553).
+pub fn vcard_to_jscontact(vcard: &str) -> Value {
+    let mut full = String::new();
+    let (mut family, mut given, mut given2, mut prefix, mut suffix) = (String::new(), String::new(), String::new(), String::new(), String::new());
+    let mut emails = serde_json::Map::new();
+    let mut phones = serde_json::Map::new();
+    let mut org_parts: Vec<String> = Vec::new();
+    let mut titles = serde_json::Map::new();
+    let mut addresses = serde_json::Map::new();
+    let mut nicknames: Vec<String> = Vec::new();
+    let mut note: Option<String> = None;
+    let mut bday: Option<String> = None;
+    let mut uid: Option<String> = None;
+    let (mut n_email, mut n_tel, mut n_title, mut n_adr) = (0, 0, 0, 0);
+
+    let type_contexts = |params: &str| -> Value {
+        let up = params.to_uppercase();
+        let mut ctx = serde_json::Map::new();
+        if up.contains("WORK") {
+            ctx.insert("work".into(), json!(true));
+        }
+        if up.contains("HOME") {
+            ctx.insert("private".into(), json!(true));
+        }
+        Value::Object(ctx)
+    };
+
+    for (name, params, value) in parse_vcard_lines(vcard) {
+        let value = unescape_vcard(&value);
+        match name.as_str() {
+            "FN" => full = value,
+            "N" => {
+                let parts: Vec<String> = value.split(';').map(|s| unescape_vcard(s)).collect();
+                family = parts.first().cloned().unwrap_or_default();
+                given = parts.get(1).cloned().unwrap_or_default();
+                given2 = parts.get(2).cloned().unwrap_or_default();
+                prefix = parts.get(3).cloned().unwrap_or_default();
+                suffix = parts.get(4).cloned().unwrap_or_default();
+            }
+            "NICKNAME" => nicknames.extend(value.split(',').map(|s| unescape_vcard(s)).filter(|s| !s.is_empty())),
+            "EMAIL" => {
+                if !value.is_empty() {
+                    n_email += 1;
+                    let mut e = serde_json::Map::new();
+                    e.insert("address".into(), json!(value));
+                    let ctx = type_contexts(&params);
+                    if !ctx.as_object().unwrap().is_empty() {
+                        e.insert("contexts".into(), ctx);
+                    }
+                    emails.insert(format!("e{n_email}"), Value::Object(e));
+                }
+            }
+            "TEL" => {
+                if !value.is_empty() {
+                    n_tel += 1;
+                    let up = params.to_uppercase();
+                    let mut features = serde_json::Map::new();
+                    if up.contains("CELL") || up.contains("MOBILE") {
+                        features.insert("mobile".into(), json!(true));
+                    }
+                    if up.contains("FAX") {
+                        features.insert("fax".into(), json!(true));
+                    }
+                    let mut p = serde_json::Map::new();
+                    p.insert("number".into(), json!(value));
+                    if !features.is_empty() {
+                        p.insert("features".into(), Value::Object(features));
+                    }
+                    let ctx = type_contexts(&params);
+                    if !ctx.as_object().unwrap().is_empty() {
+                        p.insert("contexts".into(), ctx);
+                    }
+                    phones.insert(format!("t{n_tel}"), Value::Object(p));
+                }
+            }
+            "ORG" => org_parts = value.split(';').map(|s| unescape_vcard(s)).filter(|s| !s.is_empty()).collect(),
+            "TITLE" | "ROLE" => {
+                if !value.is_empty() {
+                    n_title += 1;
+                    let kind = if name == "ROLE" { "role" } else { "title" };
+                    titles.insert(format!("ti{n_title}"), json!({ "name": value, "kind": kind }));
+                }
+            }
+            "ADR" => {
+                if let Some(addr) = vcard_adr_to_jscontact(&value, &type_contexts(&params)) {
+                    n_adr += 1;
+                    addresses.insert(format!("a{n_adr}"), addr);
+                }
+            }
+            "NOTE" => note = Some(value),
+            "BDAY" => bday = Some(value),
+            "UID" => uid = Some(value),
+            _ => {}
+        }
+    }
+
+    if full.is_empty() {
+        full = format!("{given} {family}").trim().to_string();
+    }
+
+    let mut card = serde_json::Map::new();
+    card.insert("@type".into(), json!("Card"));
+    card.insert("version".into(), json!("1.0"));
+    // uid is mandatory in JSContact; synthesize a stable one when the vCard has none.
+    let key = contact_key(vcard);
+    card.insert("uid".into(), json!(uid.filter(|s| !s.is_empty()).unwrap_or_else(|| format!("urn:x-godwit:{key}"))));
+
+    let mut components = Vec::new();
+    for (kind, val) in [("surname", &family), ("given", &given), ("given2", &given2), ("title", &prefix), ("credential", &suffix)] {
+        if !val.is_empty() {
+            components.push(json!({ "kind": kind, "value": val }));
+        }
+    }
+    let mut name_obj = serde_json::Map::new();
+    if !full.is_empty() {
+        name_obj.insert("full".into(), json!(full));
+    }
+    if !components.is_empty() {
+        name_obj.insert("components".into(), json!(components));
+    }
+    if !name_obj.is_empty() {
+        card.insert("name".into(), Value::Object(name_obj));
+    }
+
+    if !nicknames.is_empty() {
+        let nick_map: serde_json::Map<String, Value> =
+            nicknames.iter().enumerate().map(|(i, n)| (format!("n{}", i + 1), json!({ "name": n }))).collect();
+        card.insert("nicknames".into(), Value::Object(nick_map));
+    }
+    if !emails.is_empty() {
+        card.insert("emails".into(), Value::Object(emails));
+    }
+    if !phones.is_empty() {
+        card.insert("phones".into(), Value::Object(phones));
+    }
+    if !org_parts.is_empty() {
+        let mut org = serde_json::Map::new();
+        org.insert("name".into(), json!(org_parts[0]));
+        if org_parts.len() > 1 {
+            org.insert("units".into(), json!(org_parts[1..].iter().map(|u| json!({ "name": u })).collect::<Vec<_>>()));
+        }
+        card.insert("organizations".into(), json!({ "o1": Value::Object(org) }));
+    }
+    if !titles.is_empty() {
+        card.insert("titles".into(), Value::Object(titles));
+    }
+    if !addresses.is_empty() {
+        card.insert("addresses".into(), Value::Object(addresses));
+    }
+    if let Some(n) = note {
+        if !n.is_empty() {
+            card.insert("notes".into(), json!({ "n1": { "note": n } }));
+        }
+    }
+    if let Some(b) = bday.and_then(|b| vcard_bday_to_partial_date(&b)) {
+        card.insert("anniversaries".into(), json!({ "k1": { "kind": "birth", "date": b } }));
+    }
+
+    Value::Object(card)
+}
+
+fn vcard_adr_to_jscontact(value: &str, contexts: &Value) -> Option<Value> {
+    let parts: Vec<String> = value.split(';').map(|s| unescape_vcard(s)).collect();
+    let kinds = ["postOfficeBox", "apartment", "name", "locality", "region", "postcode", "country"];
+    let mut components = Vec::new();
+    for (i, kind) in kinds.iter().enumerate() {
+        if let Some(v) = parts.get(i).filter(|s| !s.is_empty()) {
+            components.push(json!({ "kind": kind, "value": v }));
+        }
+    }
+    if components.is_empty() {
+        return None;
+    }
+    let mut addr = serde_json::Map::new();
+    addr.insert("components".into(), json!(components));
+    if !contexts.as_object().map(|m| m.is_empty()).unwrap_or(true) {
+        addr.insert("contexts".into(), contexts.clone());
+    }
+    Some(Value::Object(addr))
+}
+
+fn vcard_bday_to_partial_date(b: &str) -> Option<Value> {
+    let digits: String = b.chars().filter(|c| c.is_ascii_digit()).collect();
+    // Accept YYYY-MM-DD / YYYYMMDD (and shorter YYYY / YYYY-MM).
+    let (y, m, d) = if b.contains('-') {
+        let mut it = b.split('-');
+        (it.next().unwrap_or(""), it.next().unwrap_or(""), it.next().unwrap_or(""))
+    } else if digits.len() >= 8 {
+        (&digits[0..4], &digits[4..6], &digits[6..8])
+    } else {
+        (digits.as_str(), "", "")
+    };
+    let mut date = serde_json::Map::new();
+    if let Ok(y) = y.parse::<u32>() {
+        if y > 0 {
+            date.insert("year".into(), json!(y));
+        }
+    }
+    if let Ok(m) = m.parse::<u32>() {
+        if (1..=12).contains(&m) {
+            date.insert("month".into(), json!(m));
+        }
+    }
+    if let Ok(d) = d.parse::<u32>() {
+        if (1..=31).contains(&d) {
+            date.insert("day".into(), json!(d));
+        }
+    }
+    (!date.is_empty()).then(|| Value::Object(date))
+}
+
 // --- Calendar: Graph <-> iCalendar ----------------------------------------
 //
 // Times are normalised to UTC on the way out of Graph (request with
@@ -609,5 +1049,107 @@ mod tests {
         assert_eq!(e["isAllDay"], false);
         assert_eq!(e["location"]["displayName"], "HQ");
         assert_eq!(event_key(ics), "x1");
+    }
+
+    // --- JSContact <-> vCard ----------------------------------------------
+
+    #[test]
+    fn jscontact_to_vcard_core_fields() {
+        let card = json!({
+            "@type": "Card", "version": "1.0",
+            "uid": "urn:uuid:abc",
+            "name": { "components": [
+                { "kind": "given", "value": "Diego" },
+                { "kind": "surname", "value": "Rivera" }
+            ] },
+            "emails": { "e1": { "address": "diego@example.com", "contexts": { "work": true } } },
+            "phones": { "t1": { "number": "tel:+1-555-0100", "features": { "mobile": true } } },
+            "organizations": { "o1": { "name": "ABC, Inc.", "units": [{ "name": "Marketing" }] } },
+            "titles": { "k2": { "kind": "role", "name": "Project Leader" } },
+            "notes": { "n1": { "note": "Met at conf" } },
+            "anniversaries": { "k8": { "kind": "birth", "date": { "year": 1953, "month": 4, "day": 15 } } }
+        });
+        let v = jscontact_to_vcard(&card);
+        assert!(v.contains("FN:Diego Rivera"));
+        assert!(v.contains("N:Rivera;Diego;;;"));
+        assert!(v.contains("diego@example.com"));
+        assert!(v.contains("TEL") && v.contains("CELL") && v.contains("+1-555-0100"));
+        assert!(v.contains("ORG:ABC\\, Inc.;Marketing")); // comma escaped, unit after ';'
+        assert!(v.contains("ROLE:Project Leader"));
+        assert!(v.contains("NOTE:Met at conf"));
+        assert!(v.contains("BDAY:1953-04-15"));
+        assert!(v.contains("UID:urn:uuid:abc"));
+    }
+
+    #[test]
+    fn vcard_to_jscontact_shapes() {
+        let v = "BEGIN:VCARD\r\nVERSION:3.0\r\nFN:Grace Hopper\r\nN:Hopper;Grace;;;\r\nEMAIL;TYPE=INTERNET,WORK:grace@example.com\r\nTEL;TYPE=CELL:+1555\r\nORG:Navy;R&D\r\nTITLE:Rear Admiral\r\nBDAY:1906-12-09\r\nUID:card-7\r\nEND:VCARD";
+        let c = vcard_to_jscontact(v);
+        assert_eq!(c["@type"], "Card");
+        assert_eq!(c["version"], "1.0");
+        assert_eq!(c["uid"], "card-7");
+        assert_eq!(c["name"]["full"], "Grace Hopper");
+        // name components carry the parsed given/surname
+        let comps = c["name"]["components"].as_array().unwrap();
+        assert!(comps.contains(&json!({ "kind": "surname", "value": "Hopper" })));
+        assert!(comps.contains(&json!({ "kind": "given", "value": "Grace" })));
+        // email keeps its address and a work context
+        let email = c["emails"].as_object().unwrap().values().next().unwrap();
+        assert_eq!(email["address"], "grace@example.com");
+        assert_eq!(email["contexts"]["work"], true);
+        // phone mobile feature
+        let phone = c["phones"].as_object().unwrap().values().next().unwrap();
+        assert_eq!(phone["features"]["mobile"], true);
+        // organization name + unit
+        assert_eq!(c["organizations"]["o1"]["name"], "Navy");
+        assert_eq!(c["organizations"]["o1"]["units"][0]["name"], "R&D");
+        assert_eq!(c["anniversaries"]["k1"]["kind"], "birth");
+        assert_eq!(c["anniversaries"]["k1"]["date"]["year"], 1906);
+    }
+
+    #[test]
+    fn vcard_without_uid_gets_a_stable_synthetic_one() {
+        let v = "BEGIN:VCARD\nFN:No Id\nEMAIL:x@y.com\nEND:VCARD";
+        let a = vcard_to_jscontact(v);
+        let b = vcard_to_jscontact(v);
+        assert_eq!(a["uid"], b["uid"]); // deterministic
+        assert_eq!(a["uid"], "urn:x-godwit:x@y.com"); // derived from the dedup key
+    }
+
+    #[test]
+    fn contact_survives_a_round_trip() {
+        let original = json!({
+            "@type": "Card", "version": "1.0", "uid": "u1",
+            "name": { "components": [
+                { "kind": "given", "value": "Ada" },
+                { "kind": "surname", "value": "Lovelace" }
+            ] },
+            "emails": { "e1": { "address": "ada@example.com" } }
+        });
+        let back = vcard_to_jscontact(&jscontact_to_vcard(&original));
+        assert_eq!(back["uid"], "u1");
+        assert_eq!(back["name"]["full"], "Ada Lovelace");
+        assert_eq!(back["emails"].as_object().unwrap().values().next().unwrap()["address"], "ada@example.com");
+    }
+
+    #[test]
+    fn address_components_map_both_ways() {
+        let card = json!({
+            "@type": "Card", "version": "1.0", "uid": "u",
+            "addresses": { "k1": { "contexts": { "work": true }, "components": [
+                { "kind": "name", "value": "Oak St" },
+                { "kind": "locality", "value": "Reston" },
+                { "kind": "region", "value": "VA" },
+                { "kind": "postcode", "value": "20190" },
+                { "kind": "country", "value": "USA" }
+            ] } }
+        });
+        let v = jscontact_to_vcard(&card);
+        assert!(v.contains("ADR") && v.contains("Oak St") && v.contains("Reston;VA;20190;USA"));
+        let back = vcard_to_jscontact(&v);
+        let addr = back["addresses"].as_object().unwrap().values().next().unwrap();
+        let comps = addr["components"].as_array().unwrap();
+        assert!(comps.contains(&json!({ "kind": "locality", "value": "Reston" })));
+        assert_eq!(addr["contexts"]["work"], true);
     }
 }

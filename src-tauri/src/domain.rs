@@ -10,8 +10,10 @@ fn default_provider() -> String {
     "password".to_string()
 }
 
-/// One account (source or destination). `provider` is "password" (IMAP/DAV) or
-/// "microsoft" (Graph via OAuth; `email` identifies the signed-in session).
+/// One account (source or destination). `provider` is "password" (IMAP/DAV),
+/// "microsoft"/"google" (OAuth; `email` identifies the signed-in session), or
+/// "jmap" (bearer API token in `password`; `jmap_url` optionally overrides
+/// `.well-known/jmap` discovery).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Account {
@@ -21,6 +23,10 @@ pub struct Account {
     pub imap_host: Option<String>,
     pub imap_port: Option<u16>,
     pub dav_url: Option<String>,
+    /// Optional explicit JMAP session URL (provider "jmap"); when empty,
+    /// discovery uses `.well-known/jmap` on the email's domain.
+    #[serde(default)]
+    pub jmap_url: Option<String>,
     #[serde(default = "default_provider")]
     pub provider: String,
 }

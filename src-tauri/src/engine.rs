@@ -9,7 +9,7 @@ use chrono::{DateTime, FixedOffset};
 use std::collections::{HashMap, HashSet};
 
 /// Standard mail flags worth carrying where the protocols allow (mail only).
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum MailFlag {
     Seen,
     Answered,
@@ -166,8 +166,10 @@ fn translate_path(name: &str, src: Option<&str>, dst: Option<&str>) -> String {
     }
 }
 
-/// Normalise a folder leaf name to a special-use category, if any.
-fn canonical_special(leaf: &str) -> Option<&'static str> {
+/// Normalise a folder leaf name to a special-use category, if any. The
+/// categories match JMAP mailbox roles (sent/drafts/trash/junk/archive), so the
+/// JMAP connector reuses this to route foreign folder names to the right role.
+pub fn canonical_special(leaf: &str) -> Option<&'static str> {
     match leaf.trim().to_lowercase().as_str() {
         "sent" | "sent messages" | "sent items" | "sent mail" => Some("sent"),
         "drafts" | "draft" => Some("drafts"),
