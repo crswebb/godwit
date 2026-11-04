@@ -197,6 +197,29 @@ fn join_structured(parts: &[String]) -> String {
     parts.iter().map(|p| escape_vcard(p)).collect::<Vec<_>>().join(";")
 }
 
+/// Split a vCard structured value on *unescaped* separators, then unescape each
+/// component exactly once — so `Doe\;Smith;Ada` → ["Doe;Smith", "Ada"], not a
+/// broken split that would corrupt escaped separators in N/ORG/ADR/NICKNAME.
+fn split_escaped(s: &str, sep: char) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            cur.push(c);
+            if let Some(next) = chars.next() {
+                cur.push(next);
+            }
+        } else if c == sep {
+            out.push(std::mem::take(&mut cur));
+        } else {
+            cur.push(c);
+        }
+    }
+    out.push(cur);
+    out.iter().map(|p| unescape_vcard(p)).collect()
+}
+
 /// Collect JSContact `name.components` into (family, given, additional, prefix, suffix).
 fn jscontact_name_parts(name: &Value) -> (String, String, String, String, String) {
     let mut by_kind: HashMap<&str, Vec<String>> = HashMap::new();
@@ -274,9 +297,9 @@ pub fn jscontact_to_vcard(card: &Value) -> String {
         .find(|s| !s.is_empty())
         .unwrap_or_default();
     lines.push(format!("FN:{}", escape_vcard(&fn_val)));
-    if !(family.is_empty() && given.is_empty() && given2.is_empty() && prefix.is_empty() && suffix.is_empty()) {
-        lines.push(format!("N:{}", join_structured(&[family, given, given2, prefix, suffix])));
-    }
+    // N is mandatory in vCard 3.0; emit empty components when no structured name
+    // is available so strict CardDAV destinations don't reject the card.
+    lines.push(format!("N:{}", join_structured(&[family, given, given2, prefix, suffix])));
 
     if let Some(nicks) = card.get("nicknames").and_then(Value::as_object) {
         let names: Vec<String> = nicks.values().filter_map(|n| n.get("name").and_then(Value::as_str)).map(|s| escape_vcard(s)).collect();
@@ -439,20 +462,21 @@ pub fn vcard_to_jscontact(vcard: &str) -> Value {
         Value::Object(ctx)
     };
 
-    for (name, params, value) in parse_vcard_lines(vcard) {
-        let value = unescape_vcard(&value);
+    for (name, params, raw) in parse_vcard_lines(vcard) {
         match name.as_str() {
-            "FN" => full = value,
+            "FN" => full = unescape_vcard(&raw),
             "N" => {
-                let parts: Vec<String> = value.split(';').map(|s| unescape_vcard(s)).collect();
+                // Split on unescaped ';' first, then unescape each component.
+                let parts = split_escaped(&raw, ';');
                 family = parts.first().cloned().unwrap_or_default();
                 given = parts.get(1).cloned().unwrap_or_default();
                 given2 = parts.get(2).cloned().unwrap_or_default();
                 prefix = parts.get(3).cloned().unwrap_or_default();
                 suffix = parts.get(4).cloned().unwrap_or_default();
             }
-            "NICKNAME" => nicknames.extend(value.split(',').map(|s| unescape_vcard(s)).filter(|s| !s.is_empty())),
+            "NICKNAME" => nicknames.extend(split_escaped(&raw, ',').into_iter().filter(|s| !s.is_empty())),
             "EMAIL" => {
+                let value = unescape_vcard(&raw);
                 if !value.is_empty() {
                     n_email += 1;
                     let mut e = serde_json::Map::new();
@@ -465,6 +489,7 @@ pub fn vcard_to_jscontact(vcard: &str) -> Value {
                 }
             }
             "TEL" => {
+                let value = unescape_vcard(&raw);
                 if !value.is_empty() {
                     n_tel += 1;
                     let up = params.to_uppercase();
@@ -487,8 +512,9 @@ pub fn vcard_to_jscontact(vcard: &str) -> Value {
                     phones.insert(format!("t{n_tel}"), Value::Object(p));
                 }
             }
-            "ORG" => org_parts = value.split(';').map(|s| unescape_vcard(s)).filter(|s| !s.is_empty()).collect(),
+            "ORG" => org_parts = split_escaped(&raw, ';').into_iter().filter(|s| !s.is_empty()).collect(),
             "TITLE" | "ROLE" => {
+                let value = unescape_vcard(&raw);
                 if !value.is_empty() {
                     n_title += 1;
                     let kind = if name == "ROLE" { "role" } else { "title" };
@@ -496,14 +522,14 @@ pub fn vcard_to_jscontact(vcard: &str) -> Value {
                 }
             }
             "ADR" => {
-                if let Some(addr) = vcard_adr_to_jscontact(&value, &type_contexts(&params)) {
+                if let Some(addr) = vcard_adr_to_jscontact(&raw, &type_contexts(&params)) {
                     n_adr += 1;
                     addresses.insert(format!("a{n_adr}"), addr);
                 }
             }
-            "NOTE" => note = Some(value),
-            "BDAY" => bday = Some(value),
-            "UID" => uid = Some(value),
+            "NOTE" => note = Some(unescape_vcard(&raw)),
+            "BDAY" => bday = Some(unescape_vcard(&raw)),
+            "UID" => uid = Some(unescape_vcard(&raw)),
             _ => {}
         }
     }
@@ -574,7 +600,7 @@ pub fn vcard_to_jscontact(vcard: &str) -> Value {
 }
 
 fn vcard_adr_to_jscontact(value: &str, contexts: &Value) -> Option<Value> {
-    let parts: Vec<String> = value.split(';').map(|s| unescape_vcard(s)).collect();
+    let parts = split_escaped(value, ';');
     let kinds = ["postOfficeBox", "apartment", "name", "locality", "region", "postcode", "country"];
     let mut components = Vec::new();
     for (i, kind) in kinds.iter().enumerate() {
@@ -594,15 +620,32 @@ fn vcard_adr_to_jscontact(value: &str, contexts: &Value) -> Option<Value> {
 }
 
 fn vcard_bday_to_partial_date(b: &str) -> Option<Value> {
-    let digits: String = b.chars().filter(|c| c.is_ascii_digit()).collect();
-    // Accept YYYY-MM-DD / YYYYMMDD (and shorter YYYY / YYYY-MM).
-    let (y, m, d) = if b.contains('-') {
-        let mut it = b.split('-');
-        (it.next().unwrap_or(""), it.next().unwrap_or(""), it.next().unwrap_or(""))
-    } else if digits.len() >= 8 {
-        (&digits[0..4], &digits[4..6], &digits[6..8])
+    let b = b.trim();
+    // Accept YYYY-MM-DD / YYYYMMDD, and the yearless --MM-DD / --MMDD form
+    // (RFC 6350) where a leading "--" omits the year — don't let the empty year
+    // shift the month into the day.
+    let (y, m, d): (String, String, String) = if let Some(rest) = b.strip_prefix("--") {
+        let p: Vec<&str> = rest.split('-').collect();
+        if p.len() >= 2 {
+            (String::new(), p[0].to_string(), p[1].to_string())
+        } else {
+            let digits: String = rest.chars().filter(|c| c.is_ascii_digit()).collect();
+            if digits.len() >= 4 {
+                (String::new(), digits[0..2].to_string(), digits[2..4].to_string())
+            } else {
+                (String::new(), digits, String::new())
+            }
+        }
+    } else if b.contains('-') {
+        let p: Vec<&str> = b.split('-').collect();
+        (p.first().copied().unwrap_or("").to_string(), p.get(1).copied().unwrap_or("").to_string(), p.get(2).copied().unwrap_or("").to_string())
     } else {
-        (digits.as_str(), "", "")
+        let digits: String = b.chars().filter(|c| c.is_ascii_digit()).collect();
+        if digits.len() >= 8 {
+            (digits[0..4].to_string(), digits[4..6].to_string(), digits[6..8].to_string())
+        } else {
+            (digits, String::new(), String::new())
+        }
     };
     let mut date = serde_json::Map::new();
     if let Ok(y) = y.parse::<u32>() {
@@ -1151,5 +1194,40 @@ mod tests {
         let comps = addr["components"].as_array().unwrap();
         assert!(comps.contains(&json!({ "kind": "locality", "value": "Reston" })));
         assert_eq!(addr["contexts"]["work"], true);
+    }
+
+    #[test]
+    fn always_emits_mandatory_n_even_without_a_structured_name() {
+        // Only name.full (no components) — vCard 3.0 still requires N.
+        let card = json!({ "@type": "Card", "version": "1.0", "uid": "u", "name": { "full": "Cher" } });
+        let v = jscontact_to_vcard(&card);
+        assert!(v.contains("FN:Cher"));
+        assert!(v.contains("N:;;;;"));
+    }
+
+    #[test]
+    fn escaped_separators_in_n_survive_parsing() {
+        // Surname "Doe;Smith" is escaped; it must stay one component, not split.
+        let v = "BEGIN:VCARD\r\nVERSION:3.0\r\nFN:Ada\r\nN:Doe\\;Smith;Ada;;;\r\nEND:VCARD";
+        let c = vcard_to_jscontact(v);
+        let comps = c["name"]["components"].as_array().unwrap();
+        assert!(comps.contains(&json!({ "kind": "surname", "value": "Doe;Smith" })));
+        assert!(comps.contains(&json!({ "kind": "given", "value": "Ada" })));
+    }
+
+    #[test]
+    fn yearless_birthday_round_trips_without_shifting_the_day() {
+        // JSContact with no year -> "--MM-DD" vCard -> back to month/day intact.
+        let card = json!({
+            "@type": "Card", "version": "1.0", "uid": "u",
+            "anniversaries": { "k1": { "kind": "birth", "date": { "month": 4, "day": 15 } } }
+        });
+        let v = jscontact_to_vcard(&card);
+        assert!(v.contains("BDAY:--04-15"));
+        let back = vcard_to_jscontact(&v);
+        let date = &back["anniversaries"]["k1"]["date"];
+        assert_eq!(date.get("year"), None);
+        assert_eq!(date["month"], 4);
+        assert_eq!(date["day"], 15);
     }
 }

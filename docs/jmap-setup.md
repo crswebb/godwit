@@ -59,7 +59,17 @@ source is only ever read.
   emails, phones, organizations, titles, addresses, notes, nicknames, birthday)
   are mapped; rare or vendor-specific JSContact properties are passed over
   rather than guessed at.
-- A message already present in the destination account is treated as a
-  successful dedup (`alreadyExists`), not an error.
+- When the same message is copied into two folders, JMAP stores one copy and
+  the second folder is added to its mailbox memberships (JMAP mail is
+  deduplicated account-wide, unlike IMAP's per-folder copies).
+- **Localized special-use source folders** may not map onto the destination's
+  standard folders. Folder mapping matches on folder *name*, not JMAP role, so a
+  source mailbox named e.g. `Posteingang` (role `inbox`) copies into a folder of
+  that name rather than the destination's INBOX. (Shared with the IMAP
+  connector; a role-aware planner is a planned follow-up.)
+- **A contact in several selected address books** is created in the first; if
+  the server enforces account-wide unique contact UIDs (RFC 9610), the duplicate
+  into the second book is reported as failed. Select one address book per
+  contact to avoid this.
 - Autodiscovery expects the standard `.well-known/jmap` resource; otherwise set
   the server URL by hand.

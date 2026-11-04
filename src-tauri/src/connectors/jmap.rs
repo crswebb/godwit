@@ -93,6 +93,9 @@ fn parse_session(v: &Value, base: &str) -> Result<Session, String> {
 /// `.well-known/jmap` on the email's domain (RFC 8620 §2.2).
 fn session_url(account: &Account) -> Result<String, String> {
     if let Some(u) = account.jmap_url.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        if u.starts_with("http://") {
+            return Err("JMAP server URL must use https.".into());
+        }
         return Ok(u.to_string());
     }
     let domain = account
@@ -119,7 +122,12 @@ impl Jmap {
         if token.is_empty() {
             return Err("Enter your JMAP API token as the password.".into());
         }
-        let client = Client::new();
+        // HTTPS-only so a misconfigured endpoint or http redirect can never send
+        // the bearer token or mailbox data in the clear.
+        let client = Client::builder()
+            .https_only(true)
+            .build()
+            .map_err(|e| format!("HTTP client setup: {e}"))?;
         let url = session_url(account)?;
         let resp = client
             .get(&url)
@@ -284,13 +292,20 @@ fn flags_to_keywords(flags: &[MailFlag]) -> Value {
 /// First `Message-ID` from an `Email/get` object (the dedup key); empty when
 /// the message has none, which the engine treats as "always copy".
 fn message_id_of(email: &Value) -> String {
-    email
+    let raw = email
         .get("messageId")
         .and_then(Value::as_array)
         .and_then(|a| a.first())
         .and_then(Value::as_str)
-        .map(|s| s.trim().to_string())
-        .unwrap_or_default()
+        .map(str::trim)
+        .unwrap_or_default();
+    if raw.is_empty() {
+        return String::new();
+    }
+    // JMAP strips the angle brackets that IMAP's ENVELOPE keeps, so the same
+    // message would otherwise get different dedup keys across connectors —
+    // re-add them to match.
+    if raw.starts_with('<') { raw.to_string() } else { format!("<{raw}>") }
 }
 
 fn first_response(v: &Value, expect: &str) -> Result<Value, String> {
@@ -489,6 +504,18 @@ impl JmapWriter {
         Err(format!("couldn't create mailbox \"{name}\": {why}"))
     }
 
+    /// Add a mailbox to an email that already exists elsewhere in the account,
+    /// preserving its other memberships (JMAP PatchObject on `mailboxIds`).
+    fn add_to_mailbox(&self, email_id: &str, mailbox: &str) -> Result<(), String> {
+        let patch = json!({ format!("mailboxIds/{mailbox}"): true });
+        let args = self.j.call(&MAIL_USING, "Email/set", json!({ "accountId": self.j.acct(), "update": { email_id: patch } }))?;
+        if let Some(err) = args.get("notUpdated").and_then(|n| n.get(email_id)) {
+            let t = err.get("type").and_then(Value::as_str).unwrap_or("unknown");
+            return Err(format!("Email/set (add to mailbox) rejected: {t}"));
+        }
+        Ok(())
+    }
+
     /// Resolve `path`, creating any missing "/"-separated levels. The local set
     /// is updated so later calls reuse the new ids.
     fn ensure_path(&mut self, path: &str) -> Result<String, String> {
@@ -537,7 +564,7 @@ impl Writer for JmapWriter {
     fn write(&mut self, collection: &str, item: &Item) -> Result<(), String> {
         let mailbox = self.ensure_path(collection)?;
         let blob_id = self.j.upload(item.bytes())?;
-        let mut email = json!({ "blobId": blob_id, "mailboxIds": { mailbox: true }, "keywords": flags_to_keywords(&item.flags) });
+        let mut email = json!({ "blobId": blob_id, "mailboxIds": { mailbox.clone(): true }, "keywords": flags_to_keywords(&item.flags) });
         if let Some(d) = item.date {
             // JMAP UTCDate must be UTC with a trailing "Z".
             email["receivedAt"] = json!(d.with_timezone(&Utc).to_rfc3339_opts(SecondsFormat::Secs, true));
@@ -546,10 +573,16 @@ impl Writer for JmapWriter {
         if args.get("created").and_then(|c| c.get("x")).is_some() {
             return Ok(());
         }
-        let why = args.get("notCreated").and_then(|n| n.get("x")).and_then(|e| e.get("type")).and_then(Value::as_str).unwrap_or("unknown");
-        // A message already present in the account is a successful dedup, not a
-        // failure — the engine's verify pass confirms it landed.
+        let not = args.get("notCreated").and_then(|n| n.get("x"));
+        let why = not.and_then(|e| e.get("type")).and_then(Value::as_str).unwrap_or("unknown");
+        // `alreadyExists` means the message is in the account but maybe in a
+        // different mailbox (the engine only skips items already in *this*
+        // folder). Add this mailbox to the existing email so copying the same
+        // message from two source folders lands it in both.
         if why == "alreadyExists" {
+            if let Some(existing) = not.and_then(|e| e.get("existingId")).and_then(Value::as_str) {
+                return self.add_to_mailbox(existing, &mailbox);
+            }
             return Ok(());
         }
         Err(format!("Email/import rejected: {why}"))
@@ -843,6 +876,14 @@ mod tests {
         assert_eq!(message_id_of(&e), "<abc@host>");
         assert_eq!(message_id_of(&serde_json::json!({ "messageId": null })), "");
         assert_eq!(message_id_of(&serde_json::json!({})), "");
+    }
+
+    #[test]
+    fn message_id_is_bracketed_to_match_imap() {
+        // JMAP returns the id without brackets; IMAP's ENVELOPE keeps them.
+        assert_eq!(message_id_of(&serde_json::json!({ "messageId": ["abc@host"] })), "<abc@host>");
+        // Already-bracketed (or a lenient server) is left as-is.
+        assert_eq!(message_id_of(&serde_json::json!({ "messageId": ["<abc@host>"] })), "<abc@host>");
     }
 
     #[test]
