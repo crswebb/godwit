@@ -180,11 +180,40 @@ pub fn canonical_special(leaf: &str) -> Option<&'static str> {
     }
 }
 
+/// Special-use category from an explicit role/special-use *attribute*: a JMAP
+/// mailbox role (`role:sent`) or an IMAP RFC 6154 special-use flag (`\Sent`).
+/// Also recognises "inbox", which names alone never map to.
+fn attr_special(attr: &str) -> Option<&'static str> {
+    let a = attr.trim();
+    let a = a.strip_prefix("role:").unwrap_or(a); // JMAP mailbox role
+    let a = a.trim_start_matches('\\'); // IMAP special-use flag (\Sent, \Trash, …)
+    match a.to_ascii_lowercase().as_str() {
+        "inbox" => Some("inbox"),
+        "sent" => Some("sent"),
+        "drafts" => Some("drafts"),
+        "trash" => Some("trash"),
+        "junk" => Some("junk"),
+        "archive" => Some("archive"),
+        _ => None,
+    }
+}
+
+/// The special-use category of a folder: an explicit role/special-use attribute
+/// if the connector supplied one (so localized names like "Posteingang" or
+/// "Gesendet" still map correctly), else the canonicalized leaf name.
+fn special_use(info: &crate::domain::FolderInfo) -> Option<&'static str> {
+    if let Some(c) = info.attributes.iter().find_map(|a| attr_special(a)) {
+        return Some(c);
+    }
+    canonical_special(&leaf_of(&info.name, info.delimiter.as_deref()))
+}
+
 /// Map each selected source folder to the right destination folder name.
 /// `dest_remaps` is false when the destination resolves folders itself (M365),
 /// in which case names pass through unchanged.
 pub fn plan_targets(
     folders: &[String],
+    src_folders: &[crate::domain::FolderInfo],
     src_delim: Option<&str>,
     dst_folders: &[crate::domain::FolderInfo],
     dst_delim: Option<&str>,
@@ -194,22 +223,32 @@ pub fn plan_targets(
         return folders.iter().map(|f| (f.clone(), f.clone())).collect();
     }
 
+    // Destination special-use folders by category, from roles/attributes where
+    // present (so a localized destination is matched too), else leaf names.
     let mut dst_special: HashMap<&'static str, String> = HashMap::new();
     for f in dst_folders {
-        let leaf = leaf_of(&f.name, dst_delim);
-        if let Some(c) = canonical_special(&leaf) {
+        if let Some(c) = special_use(f) {
             dst_special.entry(c).or_insert_with(|| f.name.clone());
         }
     }
 
+    let src_by_name: HashMap<&str, &crate::domain::FolderInfo> =
+        src_folders.iter().map(|f| (f.name.as_str(), f)).collect();
+
     folders
         .iter()
         .map(|f| {
-            if is_inbox(f) {
+            // Source special-use: prefer the folder's own role/attribute (which
+            // survives localization), else INBOX by name, else the leaf name.
+            let src_special = src_by_name
+                .get(f.as_str())
+                .and_then(|i| special_use(i))
+                .or_else(|| if is_inbox(f) { Some("inbox") } else { canonical_special(&leaf_of(f, src_delim)) });
+
+            if src_special == Some("inbox") {
                 return (f.clone(), "INBOX".to_string());
             }
-            let leaf = leaf_of(f, src_delim);
-            if let Some(c) = canonical_special(&leaf) {
+            if let Some(c) = src_special {
                 if let Some(dest_name) = dst_special.get(c) {
                     return (f.clone(), dest_name.clone());
                 }
@@ -259,14 +298,46 @@ mod tests {
             crate::domain::FolderInfo { name: "Sent Items".into(), delimiter: Some("/".into()), attributes: vec![] },
             crate::domain::FolderInfo { name: "INBOX".into(), delimiter: Some("/".into()), attributes: vec![] },
         ];
-        let pairs = plan_targets(&["INBOX.Sent".to_string()], Some("."), &dst, Some("/"), true);
+        let pairs = plan_targets(&["INBOX.Sent".to_string()], &[], Some("."), &dst, Some("/"), true);
         assert_eq!(pairs[0], ("INBOX.Sent".to_string(), "Sent Items".to_string()));
     }
 
     #[test]
     fn m365_destination_passes_names_through() {
-        let pairs = plan_targets(&["INBOX.Sent".to_string()], Some("."), &[], None, false);
+        let pairs = plan_targets(&["INBOX.Sent".to_string()], &[], Some("."), &[], None, false);
         assert_eq!(pairs[0], ("INBOX.Sent".to_string(), "INBOX.Sent".to_string()));
+    }
+
+    #[test]
+    fn attr_special_reads_jmap_roles_and_imap_flags() {
+        assert_eq!(attr_special("role:sent"), Some("sent"));
+        assert_eq!(attr_special("\\Sent"), Some("sent"));
+        assert_eq!(attr_special("role:inbox"), Some("inbox"));
+        assert_eq!(attr_special("\\Trash"), Some("trash"));
+        assert_eq!(attr_special("HasChildren"), None);
+    }
+
+    #[test]
+    fn maps_localized_folders_by_role() {
+        // Source folders have localized names but carry roles (JMAP) or IMAP
+        // special-use flags; the destination's Sent also matched by role.
+        let src = vec![
+            crate::domain::FolderInfo { name: "Posteingang".into(), delimiter: Some("/".into()), attributes: vec!["role:inbox".into()] },
+            crate::domain::FolderInfo { name: "Gesendet".into(), delimiter: Some("/".into()), attributes: vec!["\\Sent".into()] },
+            crate::domain::FolderInfo { name: "Projekte".into(), delimiter: Some("/".into()), attributes: vec![] },
+        ];
+        let dst = vec![crate::domain::FolderInfo { name: "Sent".into(), delimiter: Some("/".into()), attributes: vec!["role:sent".into()] }];
+        let pairs = plan_targets(
+            &["Posteingang".to_string(), "Gesendet".to_string(), "Projekte".to_string()],
+            &src,
+            Some("/"),
+            &dst,
+            Some("/"),
+            true,
+        );
+        assert_eq!(pairs[0], ("Posteingang".to_string(), "INBOX".to_string()));
+        assert_eq!(pairs[1], ("Gesendet".to_string(), "Sent".to_string()));
+        assert_eq!(pairs[2], ("Projekte".to_string(), "Projekte".to_string())); // ordinary folder, passed through
     }
 
     // A faithful in-memory mailbox that actually stores and reflects writes, so

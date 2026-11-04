@@ -650,6 +650,29 @@ impl Reader for JmapContactsReader {
 struct JmapContactsWriter {
     j: Jmap,
     account: String,
+    /// JSContact uid -> ContactCard id, for cards created in this run, so a
+    /// contact selected in two address books is merged rather than recreated.
+    created: HashMap<String, String>,
+}
+
+impl JmapContactsWriter {
+    /// The id of an existing card with this account-wide-unique uid, if any.
+    fn find_card_by_uid(&self, uid: &str) -> Result<Option<String>, String> {
+        let ids = self.j.query(&CONTACTS_USING, "ContactCard/query", &self.account, json!({ "uid": uid }), Value::Null)?;
+        Ok(ids.into_iter().next())
+    }
+
+    /// Add an address book to an existing card, preserving its other books
+    /// (JMAP PatchObject on `addressBookIds`).
+    fn add_card_to_book(&self, card_id: &str, book: &str) -> Result<(), String> {
+        let patch = json!({ format!("addressBookIds/{book}"): true });
+        let args = self.j.call(&CONTACTS_USING, "ContactCard/set", json!({ "accountId": self.account, "update": { card_id: patch } }))?;
+        if let Some(err) = args.get("notUpdated").and_then(|n| n.get(card_id)) {
+            let t = err.get("type").and_then(Value::as_str).unwrap_or("unknown");
+            return Err(format!("ContactCard/set (add to book) rejected: {t}"));
+        }
+        Ok(())
+    }
 }
 
 impl Writer for JmapContactsWriter {
@@ -670,14 +693,33 @@ impl Writer for JmapContactsWriter {
 
     fn write(&mut self, collection: &str, item: &Item) -> Result<(), String> {
         let mut card = convert::vcard_to_jscontact(&item.as_text());
+        let uid = card.get("uid").and_then(Value::as_str).unwrap_or_default().to_string();
         if let Some(obj) = card.as_object_mut() {
             obj.insert("addressBookIds".into(), json!({ collection: true }));
         }
+        // RFC 9610 requires card uids to be unique account-wide, so the same
+        // contact can't be created twice. If it already exists (created earlier
+        // in this run, or in another book from a prior migration), add this book
+        // to it instead of creating a duplicate.
+        if !uid.is_empty() {
+            if let Some(id) = self.created.get(&uid).cloned() {
+                return self.add_card_to_book(&id, collection);
+            }
+        }
         let args = self.j.call(&CONTACTS_USING, "ContactCard/set", json!({ "accountId": self.account, "create": { "x": card } }))?;
-        if args.get("created").and_then(|c| c.get("x")).is_some() {
+        if let Some(id) = args.get("created").and_then(|c| c.get("x")).and_then(|c| c.get("id")).and_then(Value::as_str) {
+            if !uid.is_empty() {
+                self.created.insert(uid, id.to_string());
+            }
             return Ok(());
         }
-        let why = args.get("notCreated").and_then(|n| n.get("x")).and_then(|e| e.get("type")).and_then(Value::as_str).unwrap_or("unknown");
+        let why = args.get("notCreated").and_then(|n| n.get("x")).and_then(|e| e.get("type")).and_then(Value::as_str).unwrap_or("unknown").to_string();
+        if !uid.is_empty() {
+            if let Some(id) = self.find_card_by_uid(&uid)? {
+                self.created.insert(uid, id.clone());
+                return self.add_card_to_book(&id, collection);
+            }
+        }
         Err(format!("ContactCard/set rejected: {why}"))
     }
 }
@@ -766,7 +808,7 @@ impl Connector for JmapConnector {
             Kind::Contacts => {
                 let j = Jmap::connect(&self.account)?;
                 let account = j.contacts_account()?;
-                Ok(Box::new(JmapContactsWriter { j, account }))
+                Ok(Box::new(JmapContactsWriter { j, account, created: HashMap::new() }))
             }
             Kind::Calendar => Err(CALENDAR_NOTE.into()),
         }
