@@ -8,7 +8,7 @@ import type { Account, MigrateSelection, Probe, Progress, UnifiedReport } from "
 /// Blank optional fields so the backend sees `null`, not empty strings.
 function normalize(a: Account): Account {
   const clean = (s: string | null) => (s && s.trim() !== "" ? s.trim() : null);
-  return { ...a, imapHost: clean(a.imapHost), davUrl: clean(a.davUrl), imapPort: a.imapPort || null };
+  return { ...a, imapHost: clean(a.imapHost), davUrl: clean(a.davUrl), jmapUrl: clean(a.jmapUrl), imapPort: a.imapPort || null };
 }
 
 export const probeAccount = (account: Account): Promise<Probe> =>

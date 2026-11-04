@@ -49,7 +49,22 @@
     </li>
   </ul>
 
-  {#if account.provider === "password"}
+  {#if account.provider === "jmap"}
+    <details class="servers" open={probe.imap.status !== "ok"}>
+      <summary>Adjust server</summary>
+      <div class="fixers">
+        <p class="fix-hint">
+          The JMAP server is auto-discovered from your email domain. Set it explicitly and press
+          <em>Try again</em> if discovery fails.
+        </p>
+        <label class="f">
+          <span>JMAP server URL</span>
+          <input type="text" bind:value={account.jmapUrl} placeholder="https://api.example.com/.well-known/jmap" spellcheck="false" autocomplete="off" />
+        </label>
+        <button class="try" onclick={onRetry} disabled={busy || running}>{busy ? "Trying…" : "Try again"}</button>
+      </div>
+    </details>
+  {:else if account.provider === "password"}
     <details class="servers" open={probe.imap.status !== "ok" || sameEmail}>
       <summary>Adjust servers</summary>
       <div class="fixers">
