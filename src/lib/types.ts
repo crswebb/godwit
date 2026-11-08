@@ -1,7 +1,7 @@
 // Shapes shared with the Rust backend (must match the serde output in
 // src-tauri/src/domain.rs). Single source of truth for the frontend.
 
-export type Provider = "password" | "microsoft" | "google";
+export type Provider = "password" | "microsoft" | "google" | "jmap";
 
 export type Account = {
   email: string;
@@ -9,6 +9,7 @@ export type Account = {
   imapHost: string | null;
   imapPort: number | null;
   davUrl: string | null;
+  jmapUrl: string | null;
   provider: Provider;
 };
 
@@ -18,6 +19,7 @@ export const blankAccount = (): Account => ({
   imapHost: null,
   imapPort: null,
   davUrl: null,
+  jmapUrl: null,
   provider: "password",
 });
 

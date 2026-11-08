@@ -28,7 +28,10 @@
   let warnings = $state<string[]>([]);
 
   function accountReady(a: Account): boolean {
-    return a.provider === "microsoft" ? a.email.trim() !== "" : a.email.trim() !== "" && a.password !== "";
+    // OAuth providers only need a signed-in email; password/JMAP need a secret
+    // too (JMAP's is the API token entered in the password field).
+    const oauth = a.provider === "microsoft" || a.provider === "google";
+    return oauth ? a.email.trim() !== "" : a.email.trim() !== "" && a.password !== "";
   }
   const canConnect = $derived(accountReady(source) && accountReady(destination) && !probing && !running);
 

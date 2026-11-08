@@ -36,6 +36,7 @@
   const signInMicrosoft = () => signIn("microsoft", msSignIn);
   const signInGoogle = () => signIn("google", googleSignIn);
   const usePassword = () => { account.provider = "password"; };
+  const useJmap = () => { account.provider = "jmap"; };
 
   const providerName = $derived(account.provider === "google" ? "Google" : "Microsoft 365");
 </script>
@@ -61,6 +62,24 @@
       {#if signInError}<p class="err">{signInError}</p>{/if}
       <button type="button" class="link" onclick={usePassword}>Use email &amp; password instead</button>
     </div>
+  {:else if account.provider === "jmap"}
+    <div class="jmap-head"><span class="badge">JMAP</span></div>
+    <label>
+      <span>Email</span>
+      <input type="text" bind:value={account.email} placeholder="you@fastmail.com" spellcheck="false" autocomplete="off" />
+    </label>
+    <label>
+      <span>API token</span>
+      <input type="password" bind:value={account.password} autocomplete="off" />
+    </label>
+    <label>
+      <span>JMAP server URL <span class="opt">(optional)</span></span>
+      <input type="text" bind:value={account.jmapUrl} placeholder="auto-discovered from your email domain" spellcheck="false" autocomplete="off" />
+    </label>
+    <p class="hint">Fastmail, Stalwart and other JMAP servers. Create an API token in your provider (see <code>docs/jmap-setup.md</code>).</p>
+    <div class="providers">
+      <button type="button" class="link" onclick={usePassword}>Use email &amp; password instead</button>
+    </div>
   {:else}
     <label>
       <span>Email</span>
@@ -73,6 +92,7 @@
     <div class="providers">
       <button type="button" class="link" onclick={signInMicrosoft} disabled={signingIn}>Use Microsoft 365</button>
       <button type="button" class="link" onclick={signInGoogle} disabled={signingIn}>Use Google</button>
+      <button type="button" class="link" onclick={useJmap}>Use JMAP</button>
     </div>
     {#if signInError}<p class="err">{signInError}</p>{/if}
   {/if}
@@ -111,7 +131,11 @@
     background: var(--accent); color: var(--accent-ink); font-weight: 600; cursor: pointer;
   }
   .oauth-btn:disabled { opacity: 0.5; cursor: not-allowed; }
-  .providers { display: flex; gap: 14px; }
+  .jmap-head { display: flex; }
+  .opt { font-weight: 400; color: var(--muted); }
+  .hint { margin: 0; font-size: 0.78rem; color: var(--muted); }
+  .hint code { font-size: 0.9em; }
+  .providers { display: flex; gap: 14px; flex-wrap: wrap; }
   .link {
     background: none; border: none; padding: 0; color: var(--accent);
     font-size: 0.8rem; cursor: pointer; text-align: left;

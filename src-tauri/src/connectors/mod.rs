@@ -5,6 +5,7 @@
 
 pub mod google;
 pub mod imapdav;
+pub mod jmap;
 pub mod ms365;
 
 use crate::domain::{
@@ -35,6 +36,7 @@ pub fn build(account: &Account) -> Box<dyn Connector> {
     match account.provider.as_str() {
         "microsoft" => Box::new(ms365::Ms365Connector::new(account.clone())),
         "google" => Box::new(google::GoogleConnector::new(account.clone())),
+        "jmap" => Box::new(jmap::JmapConnector::new(account.clone())),
         _ => Box::new(imapdav::ImapDavConnector::new(account.clone())),
     }
 }
@@ -71,11 +73,13 @@ pub fn run(
 
     // Mail
     if !selection.folders.is_empty() {
-        let src_delim = src.folders().ok().and_then(|fs| fs.into_iter().find_map(|f| f.delimiter));
+        let src_folders = src.folders().unwrap_or_default();
+        let src_delim = src_folders.iter().find_map(|f| f.delimiter.clone());
         let dst_folders = if dst.remaps_folders() { dst.folders()? } else { Vec::new() };
         let dst_delim = dst_folders.iter().find_map(|f| f.delimiter.clone());
         let pairs = engine::plan_targets(
             &selection.folders,
+            &src_folders,
             src_delim.as_deref(),
             &dst_folders,
             dst_delim.as_deref(),

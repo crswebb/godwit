@@ -80,8 +80,10 @@ godwit/
 ## Status
 
 **Pre-MVP — core migration working (2026-09-14).**
-Email, calendars, and contacts migrate between **IMAP/CalDAV/CardDAV hosts and Microsoft 365**, in any
-combination, from one unified flow: enter two accounts, connect, pick what to bring across.
+Email, calendars, and contacts migrate between **IMAP/CalDAV/CardDAV hosts, Microsoft 365, and Google**,
+in any combination, from one unified flow: enter two accounts, connect, pick what to bring across.
+**JMAP** (Fastmail, Stalwart…) is supported for email and contacts (calendars over
+JMAP are still an IETF draft — use CalDAV) — see [`docs/jmap-setup.md`](docs/jmap-setup.md).
 - **Email** rides as raw MIME (IMAP `BODY.PEEK` / Graph MIME), preserving flags + dates, deduped and
   verified by Message-ID; cross-host folder mapping (delimiter + special-use).
 - **Calendars / contacts** ride as iCalendar / vCard; Microsoft 365 is converted to/from Graph JSON.
@@ -97,6 +99,7 @@ Next: keychain token persistence, a Google connector, and packaging/signing for 
 - [`docs/DECISIONS.md`](docs/DECISIONS.md) — key decisions and their rationale.
 - [`docs/microsoft-setup.md`](docs/microsoft-setup.md) — one-time Microsoft 365 (Entra) app registration.
 - [`docs/google-setup.md`](docs/google-setup.md) — bring-your-own Google (Gmail) OAuth client, or app password.
+- [`docs/jmap-setup.md`](docs/jmap-setup.md) — JMAP (Fastmail, Stalwart…) via an API token; email + contacts.
 - [`docs/architecture-diagram.html`](docs/architecture-diagram.html) — rendered diagrams for quick viewing.
 
 ## License

@@ -332,7 +332,17 @@ fn list_folders_session(mut session: ImapSession) -> Result<Vec<FolderInfo>, Str
                 .map(|n| FolderInfo {
                     name: n.name().to_string(),
                     delimiter: n.delimiter().map(str::to_string),
-                    attributes: n.attributes().iter().map(|a| format!("{a:?}")).collect(),
+                    // Keep RFC 6154 special-use flags (\Sent, \Trash, …) as their
+                    // raw "\Name" so folder mapping can read them; others stay as
+                    // their debug label (informational only).
+                    attributes: n
+                        .attributes()
+                        .iter()
+                        .map(|a| match a {
+                            imap::types::NameAttribute::Custom(s) => s.to_string(),
+                            other => format!("{other:?}"),
+                        })
+                        .collect(),
                 })
                 .collect()
         });
